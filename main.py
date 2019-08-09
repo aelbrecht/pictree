@@ -14,9 +14,13 @@ def get_extensions_for_type(general_type):
 
 
 mimetypes.init()
-video_ext = list(get_extensions_for_type('video'))
-image_ext = list(get_extensions_for_type('image')) + ['.heic']
+video_ext = list(get_extensions_for_type('video')) + ['.m4v']
+image_ext = list(get_extensions_for_type('image')) + ['.heic', '.cr2', '.xmp', '.aee']
+audio_ext = list(get_extensions_for_type('audio'))
 
+
+print(audio_ext)
+exit()
 
 def get_exif(path):
     try:
