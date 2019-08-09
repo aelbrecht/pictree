@@ -19,9 +19,6 @@ image_ext = list(get_extensions_for_type('image')) + ['.heic', '.cr2', '.xmp', '
 audio_ext = list(get_extensions_for_type('audio'))
 
 
-print(audio_ext)
-exit()
-
 def get_exif(path):
     try:
         media = Image.open(path)
@@ -47,7 +44,7 @@ for dir_name, _, file_list in os.walk(root_directory):
         if file_name[0] == '.':
             continue
         ext = '.' + str(file_name.split('.').pop()).lower()
-        if ext in image_ext or ext in video_ext:
+        if ext in image_ext or ext in video_ext or ext in audio_ext:
             file_src_path = '%s/%s' % (dir_name, file_name)
             file_last_modified = get_exif(file_src_path)
 
