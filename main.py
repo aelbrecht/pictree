@@ -73,6 +73,7 @@ if __name__ == '__main__':
                 if dst_stat.st_mtime == src_stat.st_mtime and dst_stat.st_size == src_stat.st_size:
                     skip_count += 1
                     skip_count_total += 1
+                    continue
                 else:
                     if dst_stat.st_size != 0:
                         suffix = '-v' + str(round(time()))
