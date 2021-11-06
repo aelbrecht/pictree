@@ -13,14 +13,21 @@ if __name__ == '__main__':
         print("missing arguments, usage: python main.py [src] [dst]")
         sys.exit(1)
 
-    root_directory = argv[1]
-    dst_directory = argv[2]
+    src_dir = argv[1]
+    if not os.path.exists(src_dir):
+        print("source directory does not exist")
+        sys.exit(1)
+
+    dst_dir = argv[2]
+    if not os.path.exists(src_dir):
+        print("destination directory does not exist")
+        sys.exit(1)
 
     copy_count_total = 0
     start_time = time()
 
     # iterate all directories
-    for dir_name, _, file_list in os.walk(root_directory):
+    for dir_name, _, file_list in os.walk(src_dir):
 
         print("{: <64} \t found {: <6}".format(dir_name, len(file_list)), end='')
         copy_count = 0
@@ -50,7 +57,7 @@ if __name__ == '__main__':
                 last_modified = datetime.fromtimestamp(os.path.getmtime(file_src_path))
 
             # create directories
-            file_dst_dir = '%s/%s' % (dst_directory, last_modified.strftime('%Y/%-m/%-d'))
+            file_dst_dir = '%s/%s' % (dst_dir, last_modified.strftime('%Y/%-m/%-d'))
             if not os.path.exists(file_dst_dir):
                 os.makedirs(file_dst_dir)
 
