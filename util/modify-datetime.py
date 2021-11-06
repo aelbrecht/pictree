@@ -1,7 +1,8 @@
 import os
 from datetime import datetime
+from sys import argv
 
-target_dir = './'
+target_dir = argv[1]
 
 for dir_name, _, file_list in os.walk(target_dir, topdown=False):
     for file_name in file_list:
