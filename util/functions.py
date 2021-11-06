@@ -10,16 +10,24 @@ def get_exif_modify_time(path):
         exif_data = media._getexif()  # noqa
         if exif_data is None:
             return None
-        if 36867 in exif_data:
-            tag = 36867  # The date and time when the original image data was generated.
-        elif 36868 in exif_data:
-            tag = 36868  # The date and time when the image was stored as digital data.
-        elif 306 in exif_data:
-            tag = 306  # The date and time of image creation.
-        else:
-            return None
-        return datetime.strptime(exif_data[tag], '%Y:%m:%d %H:%M:%S')
+        if 36867 in exif_data:  # The date and time when the original image data was generated.
+            try:
+                return datetime.strptime(exif_data[36867], '%Y:%m:%d %H:%M:%S')
+            except ValueError:
+                pass
+        if 36868 in exif_data:  # The date and time when the image was stored as digital data.
+            try:
+                return datetime.strptime(exif_data[36868], '%Y:%m:%d %H:%M:%S')
+            except ValueError:
+                pass
+        if 306 in exif_data:  # The date and time of image creation.
+            try:
+                return datetime.strptime(exif_data[306], '%Y:%m:%d %H:%M:%S')
+            except ValueError:
+                pass
     except UnidentifiedImageError:
+        return None
+    except AttributeError:
         return None
 
 

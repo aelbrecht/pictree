@@ -16,11 +16,15 @@ if __name__ == '__main__':
     root_directory = argv[1]
     dst_directory = argv[2]
 
-    file_count = 0
+    copy_count_total = 0
     start_time = time()
 
     # iterate all directories
     for dir_name, _, file_list in os.walk(root_directory):
+
+        print("{: <64} \t found {: <6}".format(dir_name, len(file_list)), end='')
+        copy_count = 0
+        skip_count = 0
 
         # iterate all files in a single directory
         for file_name in file_list:
@@ -45,36 +49,34 @@ if __name__ == '__main__':
             if last_modified is None:
                 last_modified = datetime.fromtimestamp(os.path.getmtime(file_src_path))
 
-            year = last_modified.year
-            month = last_modified.month
-            day = last_modified.day
-
-            raw_file_name = last_modified.strftime('%Y%m%d-%H%M%S') + '-%s' % ''.join(file_name.split('.')[:-1])
-
             # create directories
-            file_dst_dir = '%s/%d/%d/%d' % (dst_directory, year, month, day)
+            file_dst_dir = '%s/%s' % (dst_directory, last_modified.strftime('%Y/%-m/%-d'))
             if not os.path.exists(file_dst_dir):
                 os.makedirs(file_dst_dir)
-                pass
 
+            # create dst filename
+            raw_file_name = last_modified.strftime('%Y%m%d-%H%M%S') + '-%s' % ''.join(file_name.split('.')[:-1])
             file_dst_path = '%s/%s' % (file_dst_dir, raw_file_name + ext)
 
+            # check if file already exists and is the same as the one being copied over
             if os.path.isfile(file_dst_path):
                 src_stat = os.stat(file_src_path)
                 dst_stat = os.stat(file_dst_path)
-
                 if dst_stat.st_mtime == src_stat.st_mtime and dst_stat.st_size == src_stat.st_size:
-                    print('%s skipped' % file_dst_path)
-                    continue
+                    skip_count += 1
                 else:
                     if dst_stat.st_size != 0:
                         suffix = '-v' + str(round(time()))
                         file_dst_path = '%s/%s' % (file_dst_dir, raw_file_name + suffix + ext)
 
+            # keep track of original media name
             with open('%s/%s' % (file_dst_dir, '.filesource'), "a+") as f:
                 f.write('%s,%s\n' % (file_src_path, file_dst_path))
 
-            print('%s' % file_dst_path)
+            # copy original media
             copyfile(file_src_path, file_dst_path)
             copystat(file_src_path, file_dst_path)
-            file_count += 1
+            copy_count += 1
+            copy_count_total += 1
+
+        print(" \t copied {: <6} \t skipped {: <6}".format(copy_count, skip_count))
