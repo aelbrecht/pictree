@@ -24,6 +24,7 @@ if __name__ == '__main__':
         sys.exit(1)
 
     copy_count_total = 0
+    skip_count_total = 0
     start_time = time()
 
     # iterate all directories
@@ -71,6 +72,7 @@ if __name__ == '__main__':
                 dst_stat = os.stat(file_dst_path)
                 if dst_stat.st_mtime == src_stat.st_mtime and dst_stat.st_size == src_stat.st_size:
                     skip_count += 1
+                    skip_count_total += 1
                 else:
                     if dst_stat.st_size != 0:
                         suffix = '-v' + str(round(time()))
@@ -87,3 +89,6 @@ if __name__ == '__main__':
             copy_count_total += 1
 
         print(" \t copied {: <6} \t skipped {: <6}".format(copy_count, skip_count))
+
+    ss = (time() - start_time) / 60
+    print("total copied: {} \t total skipped: {} \t took {:.2f} minutes".format(copy_count_total, skip_count_total, ss))
