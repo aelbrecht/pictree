@@ -23,6 +23,14 @@ if __name__ == '__main__':
         print("destination directory does not exist")
         sys.exit(1)
 
+    year_limit = 0
+    if len(argv) > 3:
+        if len(argv[3]) != 4:
+            print("lower limit must be a year (e.g. 2007)")
+            sys.exit(1)
+        else:
+            year_limit = int(argv[3])
+
     copy_count_total = 0
     skip_count_total = 0
     start_time = time()
@@ -56,6 +64,10 @@ if __name__ == '__main__':
             last_modified = get_exif_modify_time(file_src_path)
             if last_modified is None:
                 last_modified = datetime.fromtimestamp(os.path.getmtime(file_src_path))
+
+            # check if year limit has been set
+            if last_modified.year < year_limit:
+                continue
 
             # create directories
             file_dst_dir = '%s/%s' % (dst_dir, last_modified.strftime('%Y/%-m/%-d'))
