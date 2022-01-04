@@ -1,7 +1,10 @@
 import mimetypes
+import sys
 from datetime import datetime
 
 from PIL import Image, UnidentifiedImageError
+
+Image.MAX_IMAGE_PIXELS = 933120000
 
 
 def get_exif_modify_time(path):
@@ -29,6 +32,9 @@ def get_exif_modify_time(path):
         return None
     except AttributeError:
         return None
+    except Image.DecompressionBombError:
+        print(f"image too large: {path}")
+        sys.exit(1)
 
 
 def get_extensions_for_type(general_type):
