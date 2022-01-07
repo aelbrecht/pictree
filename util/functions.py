@@ -1,16 +1,27 @@
 import mimetypes
 import sys
 from datetime import datetime
+from xml.etree import ElementTree
 
 from PIL import Image, UnidentifiedImageError
 
 Image.MAX_IMAGE_PIXELS = 933120000
 
 
-def get_exif_modify_time(path):
+def get_exif_modify_time(path, use_load=False):
     try:
         media = Image.open(path)
-        exif_data = media._getexif()  # noqa
+        exif_data = media.getexif()  # noqa
+        if len(exif_data.keys()) == 0 and use_load:
+            media.load()
+            info = media.info.get('XML:com.adobe.xmp')
+            if info is None:
+                return None
+            tree = ElementTree.fromstring(info)
+            created = tree.find(".//{http://ns.adobe.com/photoshop/1.0/}DateCreated")
+            if created is None:
+                return None
+            return datetime.strptime(created.text, '%Y-%m-%dT%H:%M:%S')
         if exif_data is None:
             return None
         if 36867 in exif_data:  # The date and time when the original image data was generated.
