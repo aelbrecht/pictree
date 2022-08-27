@@ -7,6 +7,9 @@ from time import time
 
 from util.functions import is_media_extension, get_exif_modify_time
 
+dry_run = False
+verbosity = 2
+
 if __name__ == '__main__':
 
     if len(argv) < 3:
@@ -35,10 +38,12 @@ if __name__ == '__main__':
     skip_count_total = 0
     start_time = time()
 
+    if verbosity > 0:
+        print(f"{src_dir} -> {dst_dir}")
+
     # iterate all directories
     for dir_name, _, file_list in os.walk(src_dir):
 
-        print("{: <64} \t found {: <6}".format(dir_name, len(file_list)), end='')
         copy_count = 0
         skip_count = 0
 
@@ -54,7 +59,8 @@ if __name__ == '__main__':
 
             # check if file is a form of media, otherwise skip
             if not is_media_extension(ext):
-                print('%s/%s unsupported' % (dir_name, file_name))
+                if verbosity > 0:
+                    print('%s/%s unsupported' % (dir_name, file_name))
                 continue
 
             # get full src path
@@ -75,8 +81,10 @@ if __name__ == '__main__':
                 os.makedirs(file_dst_dir)
 
             # create dst filename
-            raw_file_name = last_modified.strftime('%Y%m%d-%H%M%S') + '-%s' % ''.join(file_name.split('.')[:-1])
-            file_dst_path = '%s/%s' % (file_dst_dir, raw_file_name + ext)
+            time_prefix = last_modified.strftime('%Y%m%d-%H%M%S')
+            raw_file_name = f"{time_prefix}-{''.join(file_name.split('.')[:-1])}"
+            full_file_name = raw_file_name + ext
+            file_dst_path = '%s/%s' % (file_dst_dir, full_file_name)
 
             # check if file already exists and is the same as the one being copied over
             if os.path.isfile(file_dst_path):
@@ -85,23 +93,55 @@ if __name__ == '__main__':
                 if dst_stat.st_mtime == src_stat.st_mtime and dst_stat.st_size == src_stat.st_size:
                     skip_count += 1
                     skip_count_total += 1
+                    if verbosity > 3:
+                        print(f"skipped file: {full_file_name}")
                     continue
                 else:
                     if dst_stat.st_size != 0:
                         suffix = '-v' + str(round(time()))
                         file_dst_path = '%s/%s' % (file_dst_dir, raw_file_name + suffix + ext)
 
-            # keep track of original media name
-            with open('%s/%s' % (file_dst_dir, '.filesource'), "a+") as f:
-                f.write('%s,%s\n' % (file_src_path, file_dst_path))
+            # check if the same file does not exist under a different name
+            is_duplicate = False
 
-            # copy original media
-            copyfile(file_src_path, file_dst_path)
-            copystat(file_src_path, file_dst_path)
+            for candidate in os.listdir(file_dst_dir):
+                if candidate.startswith(time_prefix):
+                    src_stat = os.stat(file_src_path)
+                    dst_stat = os.stat(f"{file_dst_dir}/{candidate}")
+                    if src_stat.st_size != dst_stat.st_size:
+                        continue
+                    if src_stat.st_mtime != dst_stat.st_mtime:
+                        continue
+                    if verbosity > 2:
+                        print(f"duplicate found: {candidate} -> {full_file_name}")
+                    is_duplicate = True
+                    break
+
+            if is_duplicate:
+                continue
+
+            if not dry_run:
+                # keep track of original media name
+                with open('%s/%s' % (file_dst_dir, '.filesource'), "a+") as f:
+                    f.write('%s,%s\n' % (file_src_path, file_dst_path))
+
+                # copy media
+                copyfile(file_src_path, file_dst_path)
+                copystat(file_src_path, file_dst_path)
+
+            if verbosity > 1:
+                print(f" ==> [copying]\t{full_file_name}", end='\r')
+                print(f" ==> [finished]\t{full_file_name}")
+
             copy_count += 1
             copy_count_total += 1
 
-        print(" \t copied {: <6} \t skipped {: <6}".format(copy_count, skip_count))
+        if verbosity > 0:
+            print("{: <64} \t found {: <6} \t copied {: <6} \t skipped {: <6}".format(dir_name, len(file_list),
+                                                                                      copy_count,
+                                                                                      skip_count))
 
     ss = (time() - start_time) / 60
-    print("total copied: {} \t total skipped: {} \t took {:.2f} minutes".format(copy_count_total, skip_count_total, ss))
+    if verbosity > 0:
+        print("total copied: {} \t total skipped: {} \t took {:.2f} minutes".format(copy_count_total, skip_count_total,
+                                                                                    ss))
