@@ -1,10 +1,9 @@
 import os
 import sys
-from datetime import datetime
 from sys import argv
 from time import time
 
-from util.functions import is_media_extension, get_exif_modify_time
+from util.functions import is_media_extension
 
 dry_run = False
 delete_list = {}
@@ -46,17 +45,8 @@ if __name__ == '__main__':
             # get full src path
             file_src_path = f"{dir_name}/{file_name}"
 
-            # extract most accurate media creation date to organize by
-            try:
-                last_modified = get_exif_modify_time(file_src_path)
-            except FileNotFoundError:
-                print(f"[error] {file_name}")
-                continue
-
-            # get prefix
-            if last_modified is None:
-                last_modified = datetime.fromtimestamp(os.path.getmtime(file_src_path))
-            time_prefix = last_modified.strftime('%Y%m%d-%H%M%S')
+            # get prefix from original file
+            time_prefix = file_name[:15]
 
             # check if the same file does not exist under a different name
             is_duplicate = False
@@ -75,8 +65,6 @@ if __name__ == '__main__':
 
             if not is_duplicate:
                 continue
-
-            # print(f"{file_name} === {fn_duplicate}")
 
             file_rem = fn_duplicate
             file_keep = file_name
