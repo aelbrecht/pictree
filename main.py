@@ -120,6 +120,9 @@ if __name__ == '__main__':
             if is_duplicate:
                 continue
 
+            if verbosity > 1:
+                print(f" ==> [copying]\t{full_file_name}", end='\r')
+
             if not dry_run:
                 # keep track of original media name
                 with open('%s/%s' % (file_dst_dir, '.filesource'), "a+") as f:
@@ -130,7 +133,6 @@ if __name__ == '__main__':
                 copystat(file_src_path, file_dst_path)
 
             if verbosity > 1:
-                print(f" ==> [copying]\t{full_file_name}", end='\r')
                 print(f" ==> [finished]\t{full_file_name}")
 
             copy_count += 1
