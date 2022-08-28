@@ -74,17 +74,24 @@ if __name__ == '__main__':
 
             # print(f"{file_name} === {fn_duplicate}")
 
-            remove_filename = file_name if len(file_name) > len(fn_duplicate) else fn_duplicate
-            orig_filename = file_name if len(file_name) < len(fn_duplicate) else fn_duplicate
-            remove_path = f"{dir_name}/{remove_filename}"
+            file_rem = fn_duplicate
+            file_keep = file_name
+            if len(file_rem) < len(file_keep):
+                file_rem, file_keep = file_keep, file_rem
+
+            if file_rem == file_keep:
+                print(f"could not delete {file_rem}")
+                sys.exit(1)
+
+            remove_path = f"{dir_name}/{file_rem}"
             delete_list[remove_path] = True
 
-            print(f"[deleting]\t{remove_filename}", end='\r')
+            print(f"[deleting]\t{file_rem}", end='\r')
 
             if not dry_run:
                 os.remove(remove_path)
 
-            print(f"[finished]\t{remove_filename}\t(original: {orig_filename})")
+            print(f"[finished]\t{file_rem}\t(original: {file_keep})")
 
             delete_count_total += 1
 
