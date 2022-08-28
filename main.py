@@ -57,6 +57,10 @@ if __name__ == '__main__':
             # extract extension from file
             ext = '.' + str(file_name.split('.').pop()).lower()
 
+            # skip metadata
+            if ext == "aae":
+                continue
+
             # check if file is a form of media, otherwise skip
             if not is_media_extension(ext):
                 if verbosity > 0:
