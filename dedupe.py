@@ -20,6 +20,7 @@ if __name__ == '__main__':
         sys.exit(1)
 
     delete_count_total = 0
+    parse_count_total = 0
     start_time = time()
 
     # iterate all directories
@@ -38,9 +39,18 @@ if __name__ == '__main__':
             # extract extension from file
             ext = '.' + str(file_name.split('.').pop()).lower()
 
+            # skip metadata
+            if ext == ".aae":
+                continue
+
             # check if file is a form of media, otherwise skip
             if not is_media_extension(ext):
                 continue
+
+            # show activity
+            parse_count_total += 1
+            if parse_count_total % 2500 == 0:
+                print(f" === checked {parse_count_total} files === ")
 
             # get full src path
             file_src_path = f"{dir_name}/{file_name}"
@@ -88,4 +98,4 @@ if __name__ == '__main__':
             delete_count_total += 1
 
     ss = (time() - start_time) / 60
-    print("total deleted: {} \t took {:.2f} minutes".format(delete_count_total, ss))
+    print("checked {} \t deleted: {} \t took {:.2f} minutes".format(parse_count_total, delete_count_total, ss))
