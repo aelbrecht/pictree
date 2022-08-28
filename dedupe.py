@@ -63,8 +63,12 @@ if __name__ == '__main__':
             fn_duplicate = None
             for candidate in os.listdir(dir_name):
                 if candidate.startswith(time_prefix) and candidate != file_name:
-                    src_stat = os.stat(file_src_path)
-                    dst_stat = os.stat(f"{dir_name}/{candidate}")
+                    try:
+                        src_stat = os.stat(file_src_path)
+                        dst_stat = os.stat(f"{dir_name}/{candidate}")
+                    except FileNotFoundError:
+                        print(f"[error] {file_name}")
+                        break
                     if src_stat.st_size != dst_stat.st_size:
                         continue
                     if src_stat.st_mtime != dst_stat.st_mtime:
