@@ -47,11 +47,15 @@ if __name__ == '__main__':
             file_src_path = f"{dir_name}/{file_name}"
 
             # extract most accurate media creation date to organize by
-            last_modified = get_exif_modify_time(file_src_path)
-            if last_modified is None:
-                last_modified = datetime.fromtimestamp(os.path.getmtime(file_src_path))
+            try:
+                last_modified = get_exif_modify_time(file_src_path)
+            except FileNotFoundError:
+                print(f"[error] {file_name}")
+                continue
 
             # get prefix
+            if last_modified is None:
+                last_modified = datetime.fromtimestamp(os.path.getmtime(file_src_path))
             time_prefix = last_modified.strftime('%Y%m%d-%H%M%S')
 
             # check if the same file does not exist under a different name
