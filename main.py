@@ -73,6 +73,8 @@ if __name__ == '__main__':
 
             # check if year limit has been set
             if last_modified.year < year_limit:
+                skip_count += 1
+                skip_count_total += 1
                 continue
 
             # create directories
@@ -118,6 +120,8 @@ if __name__ == '__main__':
                     break
 
             if is_duplicate:
+                skip_count += 1
+                skip_count_total += 1
                 continue
 
             if verbosity > 1:
