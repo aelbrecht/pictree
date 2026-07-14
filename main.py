@@ -2,38 +2,20 @@ import os
 import sys
 from datetime import datetime
 from shutil import copyfile, copystat
-from sys import argv
 from time import time
+from typing import Sequence
 
-from util.functions import is_media_extension, get_exif_modify_time
+from util.functions import get_exif_modify_time, is_media_extension
 
-dry_run = False
-verbosity = 2
 
-if __name__ == '__main__':
-
-    if len(argv) < 3:
-        print("missing arguments, usage: python main.py [src] [dst]")
-        sys.exit(1)
-
-    src_dir = argv[1]
-    if not os.path.exists(src_dir):
-        print("source directory does not exist")
-        sys.exit(1)
-
-    dst_dir = argv[2]
-    if not os.path.exists(src_dir):
-        print("destination directory does not exist")
-        sys.exit(1)
-
-    year_limit = 0
-    if len(argv) > 3:
-        if len(argv[3]) != 4:
-            print("lower limit must be a year (e.g. 2007)")
-            sys.exit(1)
-        else:
-            year_limit = int(argv[3])
-
+def sync_media(
+    src_dir: str,
+    dst_dir: str,
+    year_limit: int = 0,
+    *,
+    dry_run: bool = False,
+    verbosity: int = 2,
+) -> tuple[int, int]:
     copy_count_total = 0
     skip_count_total = 0
     start_time = time()
@@ -41,54 +23,38 @@ if __name__ == '__main__':
     if verbosity > 0:
         print(f"{src_dir} -> {dst_dir}")
 
-    # iterate all directories
     for dir_name, _, file_list in os.walk(src_dir):
-
         copy_count = 0
         skip_count = 0
 
-        # iterate all files in a single directory
         for file_name in file_list:
-
-            # check if file should be excluded
             if file_name[0] == '.':
                 continue
 
-            # extract extension from file
             ext = '.' + str(file_name.split('.').pop()).lower()
-
-            # check if file is a form of media, otherwise skip
             if not is_media_extension(ext):
                 if verbosity > 0:
-                    print('%s/%s unsupported' % (dir_name, file_name))
+                    print(f"{dir_name}/{file_name} unsupported")
                 continue
 
-            # get full src path
-            file_src_path = '%s/%s' % (dir_name, file_name)
-
-            # extract most accurate media creation date to organize by
+            file_src_path = os.path.join(dir_name, file_name)
             last_modified = get_exif_modify_time(file_src_path)
             if last_modified is None:
                 last_modified = datetime.fromtimestamp(os.path.getmtime(file_src_path))
 
-            # check if year limit has been set
             if last_modified.year < year_limit:
                 skip_count += 1
                 skip_count_total += 1
                 continue
 
-            # create directories
-            file_dst_dir = '%s/%s' % (dst_dir, last_modified.strftime('%Y/%-m/%-d'))
-            if not os.path.exists(file_dst_dir):
-                os.makedirs(file_dst_dir)
+            file_dst_dir = os.path.join(dst_dir, last_modified.strftime('%Y/%-m/%-d'))
+            os.makedirs(file_dst_dir, exist_ok=True)
 
-            # create dst filename
             time_prefix = last_modified.strftime('%Y%m%d-%H%M%S')
             raw_file_name = f"{time_prefix}-{''.join(file_name.split('.')[:-1])}"
             full_file_name = raw_file_name + ext
-            file_dst_path = '%s/%s' % (file_dst_dir, full_file_name)
+            file_dst_path = os.path.join(file_dst_dir, full_file_name)
 
-            # check if file already exists and is the same as the one being copied over
             if os.path.isfile(file_dst_path):
                 src_stat = os.stat(file_src_path)
                 dst_stat = os.stat(file_dst_path)
@@ -98,18 +64,15 @@ if __name__ == '__main__':
                     if verbosity > 3:
                         print(f"skipped file: {full_file_name}")
                     continue
-                else:
-                    if dst_stat.st_size != 0:
-                        suffix = '-v' + str(round(time()))
-                        file_dst_path = '%s/%s' % (file_dst_dir, raw_file_name + suffix + ext)
+                if dst_stat.st_size != 0:
+                    suffix = '-v' + str(round(time()))
+                    file_dst_path = os.path.join(file_dst_dir, raw_file_name + suffix + ext)
 
-            # check if the same file does not exist under a different name
             is_duplicate = False
-
             for candidate in os.listdir(file_dst_dir):
                 if candidate.startswith(time_prefix):
                     src_stat = os.stat(file_src_path)
-                    dst_stat = os.stat(f"{file_dst_dir}/{candidate}")
+                    dst_stat = os.stat(os.path.join(file_dst_dir, candidate))
                     if src_stat.st_size != dst_stat.st_size:
                         continue
                     if src_stat.st_mtime != dst_stat.st_mtime:
@@ -128,11 +91,10 @@ if __name__ == '__main__':
                 print(f" ==> [copying]\t{full_file_name}", end='\r')
 
             if not dry_run:
-                # keep track of original media name
-                with open('%s/%s' % (file_dst_dir, '.filesource'), "a+") as f:
-                    f.write('%s,%s\n' % (file_src_path, file_dst_path))
+                source_log_path = os.path.join(file_dst_dir, '.filesource')
+                with open(source_log_path, 'a+', encoding='utf-8') as source_log:
+                    source_log.write(f"{file_src_path},{file_dst_path}\n")
 
-                # copy media
                 copyfile(file_src_path, file_dst_path)
                 copystat(file_src_path, file_dst_path)
 
@@ -143,11 +105,53 @@ if __name__ == '__main__':
             copy_count_total += 1
 
         if verbosity > 0:
-            print("{: <64} \t found {: <6} \t copied {: <6} \t skipped {: <6}".format(dir_name, len(file_list),
-                                                                                      copy_count,
-                                                                                      skip_count))
+            print(
+                "{: <64} \t found {: <6} \t copied {: <6} \t skipped {: <6}".format(
+                    dir_name,
+                    len(file_list),
+                    copy_count,
+                    skip_count,
+                )
+            )
 
-    ss = (time() - start_time) / 60
+    elapsed_minutes = (time() - start_time) / 60
     if verbosity > 0:
-        print("total copied: {} \t total skipped: {} \t took {:.2f} minutes".format(copy_count_total, skip_count_total,
-                                                                                    ss))
+        print(
+            "total copied: {} \t total skipped: {} \t took {:.2f} minutes".format(
+                copy_count_total,
+                skip_count_total,
+                elapsed_minutes,
+            )
+        )
+
+    return copy_count_total, skip_count_total
+
+
+def main(args: Sequence[str] | None = None) -> int:
+    args = list(sys.argv[1:] if args is None else args)
+    if len(args) < 2:
+        print("missing arguments, usage: python main.py [src] [dst] [year]")
+        return 1
+
+    src_dir, dst_dir = args[:2]
+    if not os.path.isdir(src_dir):
+        print("source directory does not exist")
+        return 1
+    if not os.path.isdir(dst_dir):
+        print("destination directory does not exist")
+        return 1
+
+    year_limit = 0
+    if len(args) > 2:
+        year = args[2]
+        if len(year) != 4 or not year.isdigit():
+            print("lower limit must be a year (e.g. 2007)")
+            return 1
+        year_limit = int(year)
+
+    sync_media(src_dir, dst_dir, year_limit)
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())
