@@ -63,6 +63,80 @@ class SyncMediaTests(unittest.TestCase):
         self.assertEqual(second_result, (0, 1))
         self.assertEqual(len(list((self.dst_dir / '2024' / '2' / '3').glob('*.jpg'))), 1)
 
+    def test_does_not_skip_different_content_with_matching_metadata(self) -> None:
+        first_source = self.src_dir / 'first.jpg'
+        first_source.write_bytes(b'AAAA')
+        second_dir = Path(self.temp_dir.name, 'second-source')
+        second_dir.mkdir()
+        second_source = second_dir / 'second.jpg'
+        second_source.write_bytes(b'BBBB')
+        os.utime(first_source, (1000, 1000))
+        os.utime(second_source, (1000, 1000))
+        captured_at = datetime(2024, 2, 3, 4, 5, 6)
+
+        with patch('main.get_exif_modify_time', return_value=captured_at):
+            first_result = main.sync_media(str(self.src_dir), str(self.dst_dir), verbosity=0)
+            second_result = main.sync_media(str(second_dir), str(self.dst_dir), verbosity=0)
+
+        destination_dir = self.dst_dir / '2024' / '2' / '3'
+        self.assertEqual(first_result, (1, 0))
+        self.assertEqual(second_result, (1, 0))
+        self.assertEqual(
+            {path.read_bytes() for path in destination_dir.glob('*.jpg')},
+            {b'AAAA', b'BBBB'},
+        )
+
+    def test_uses_unique_version_paths_for_multiple_conflicts(self) -> None:
+        source_dirs = [self.src_dir]
+        for index in range(2):
+            source_dir = Path(self.temp_dir.name, f'additional-source-{index}')
+            source_dir.mkdir()
+            source_dirs.append(source_dir)
+
+        for source_dir, contents in zip(source_dirs, (b'AAA', b'BBB', b'CCC')):
+            source = source_dir / 'photo.jpg'
+            source.write_bytes(contents)
+            os.utime(source, (1000, 1000))
+
+        captured_at = datetime(2024, 2, 3, 4, 5, 6)
+        with (
+            patch('main.get_exif_modify_time', return_value=captured_at),
+            patch('main.time', return_value=1234),
+        ):
+            results = [
+                main.sync_media(str(source_dir), str(self.dst_dir), verbosity=0)
+                for source_dir in source_dirs
+            ]
+
+        destination_dir = self.dst_dir / '2024' / '2' / '3'
+        self.assertEqual(results, [(1, 0), (1, 0), (1, 0)])
+        self.assertEqual(
+            {path.name for path in destination_dir.glob('*.jpg')},
+            {
+                '20240203-040506-photo.jpg',
+                '20240203-040506-photo-v1234.jpg',
+                '20240203-040506-photo-v1234-2.jpg',
+            },
+        )
+        self.assertEqual(
+            {path.read_bytes() for path in destination_dir.glob('*.jpg')},
+            {b'AAA', b'BBB', b'CCC'},
+        )
+
+    def test_dry_run_does_not_create_destination_directories(self) -> None:
+        (self.src_dir / 'photo.jpg').write_bytes(b'image')
+
+        with patch('main.get_exif_modify_time', return_value=datetime(2024, 2, 3, 4, 5, 6)):
+            result = main.sync_media(
+                str(self.src_dir),
+                str(self.dst_dir),
+                dry_run=True,
+                verbosity=0,
+            )
+
+        self.assertEqual(result, (1, 0))
+        self.assertEqual(list(self.dst_dir.iterdir()), [])
+
     def test_skips_media_before_year_limit_and_ignores_unsupported_files(self) -> None:
         (self.src_dir / 'old.jpg').write_bytes(b'old image')
         (self.src_dir / 'notes.txt').write_text('not media', encoding='utf-8')

@@ -1,5 +1,7 @@
 import mimetypes
+import os
 import sys
+from collections.abc import Iterator
 from datetime import datetime
 from xml.etree import ElementTree
 
@@ -8,7 +10,7 @@ from PIL import Image, UnidentifiedImageError
 Image.MAX_IMAGE_PIXELS = 933120000
 
 
-def get_exif_modify_time(path, use_load=False):
+def get_exif_modify_time(path: str, use_load: bool = False) -> datetime | None:
     try:
         with Image.open(path) as media:
             exif_data = media.getexif()
@@ -17,27 +19,30 @@ def get_exif_modify_time(path, use_load=False):
                 info = media.info.get('XML:com.adobe.xmp')
                 if info is None:
                     return None
-                tree = ElementTree.fromstring(info)
-                created = tree.find(".//{http://ns.adobe.com/photoshop/1.0/}DateCreated")
-                if created is None:
+                try:
+                    tree = ElementTree.fromstring(info)
+                    created = tree.find(".//{http://ns.adobe.com/photoshop/1.0/}DateCreated")
+                    if created is None or created.text is None:
+                        return None
+                    return datetime.strptime(created.text, '%Y-%m-%dT%H:%M:%S')
+                except (ElementTree.ParseError, TypeError, ValueError):
                     return None
-                return datetime.strptime(created.text, '%Y-%m-%dT%H:%M:%S')
             if exif_data is None:
                 return None
             if 36867 in exif_data:  # The date and time when the original image data was generated.
                 try:
                     return datetime.strptime(exif_data[36867], '%Y:%m:%d %H:%M:%S')
-                except ValueError:
+                except (TypeError, ValueError):
                     pass
             if 36868 in exif_data:  # The date and time when the image was stored as digital data.
                 try:
                     return datetime.strptime(exif_data[36868], '%Y:%m:%d %H:%M:%S')
-                except ValueError:
+                except (TypeError, ValueError):
                     pass
             if 306 in exif_data:  # The date and time of image creation.
                 try:
                     return datetime.strptime(exif_data[306], '%Y:%m:%d %H:%M:%S')
-                except ValueError:
+                except (TypeError, ValueError):
                     pass
     except UnidentifiedImageError:
         return None
@@ -48,7 +53,7 @@ def get_exif_modify_time(path, use_load=False):
         sys.exit(1)
 
 
-def get_extensions_for_type(general_type):
+def get_extensions_for_type(general_type: str) -> Iterator[str]:
     for ext in mimetypes.types_map:
         if mimetypes.types_map[ext].split('/')[0] == general_type:
             yield ext
@@ -62,3 +67,19 @@ audio_ext = list(get_extensions_for_type('audio'))
 
 def is_media_extension(ext: str) -> bool:
     return ext in image_ext or ext in video_ext or ext in audio_ext
+
+
+def files_have_same_content(first_path: str, second_path: str, chunk_size: int = 1024 * 1024) -> bool:
+    if chunk_size <= 0:
+        raise ValueError("chunk_size must be positive")
+    if os.path.getsize(first_path) != os.path.getsize(second_path):
+        return False
+
+    with open(first_path, 'rb') as first_file, open(second_path, 'rb') as second_file:
+        while True:
+            first_chunk = first_file.read(chunk_size)
+            second_chunk = second_file.read(chunk_size)
+            if first_chunk != second_chunk:
+                return False
+            if not first_chunk:
+                return True

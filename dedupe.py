@@ -1,105 +1,107 @@
 import os
 import sys
-from sys import argv
 from time import time
+from typing import Sequence
 
-from util.functions import is_media_extension
+from util.functions import files_have_same_content, is_media_extension
 
-dry_run = False
-delete_list = {}
 
-if __name__ == '__main__':
-
-    if len(argv) < 2:
-        print("missing arguments, usage: python dedupe.py [src]")
-        sys.exit(1)
-
-    src_dir = argv[1]
-    if not os.path.exists(src_dir):
-        print("source directory does not exist")
-        sys.exit(1)
-
+def deduplicate(src_dir: str, *, dry_run: bool = False, verbosity: int = 1) -> tuple[int, int]:
+    deleted_paths: set[str] = set()
     delete_count_total = 0
     parse_count_total = 0
     start_time = time()
 
-    # iterate all directories
     for dir_name, _, file_list in os.walk(src_dir):
-
-        # iterate all files in a single directory
         for file_name in file_list:
-
-            if f"{dir_name}/{file_name}" in delete_list:
+            file_src_path = os.path.join(dir_name, file_name)
+            if file_src_path in deleted_paths or file_name[0] == '.':
                 continue
 
-            # check if file should be excluded
-            if file_name[0] == '.':
-                continue
-
-            # extract extension from file
             ext = '.' + str(file_name.split('.').pop()).lower()
-
-            # skip metadata
-            if ext == ".aae":
+            if ext == '.aae' or not is_media_extension(ext):
                 continue
 
-            # check if file is a form of media, otherwise skip
-            if not is_media_extension(ext):
-                continue
-
-            # show activity
             parse_count_total += 1
-            if parse_count_total % 2500 == 0:
+            if verbosity > 0 and parse_count_total % 2500 == 0:
                 print(f" === checked {parse_count_total} files === ")
 
-            # get full src path
-            file_src_path = f"{dir_name}/{file_name}"
-
-            # get prefix from original file
             time_prefix = file_name[:15]
-
-            # check if the same file does not exist under a different name
-            is_duplicate = False
-            fn_duplicate = None
+            duplicate_name: str | None = None
             for candidate in os.listdir(dir_name):
-                if candidate.startswith(time_prefix) and candidate != file_name:
-                    try:
-                        src_stat = os.stat(file_src_path)
-                        dst_stat = os.stat(f"{dir_name}/{candidate}")
-                    except FileNotFoundError:
-                        print(f"[error] {file_name}")
-                        break
-                    if src_stat.st_size != dst_stat.st_size:
-                        continue
-                    if src_stat.st_mtime != dst_stat.st_mtime:
-                        continue
-                    is_duplicate = True
-                    fn_duplicate = candidate
-                    break
+                candidate_path = os.path.join(dir_name, candidate)
+                if (
+                    not candidate.startswith(time_prefix)
+                    or candidate == file_name
+                    or candidate_path in deleted_paths
+                    or not os.path.isfile(candidate_path)
+                ):
+                    continue
 
-            if not is_duplicate:
+                try:
+                    src_stat = os.stat(file_src_path)
+                    candidate_stat = os.stat(candidate_path)
+                except FileNotFoundError:
+                    if verbosity > 0:
+                        print(f"[error] {file_name}")
+                    continue
+                if src_stat.st_size != candidate_stat.st_size:
+                    continue
+                if src_stat.st_mtime != candidate_stat.st_mtime:
+                    continue
+                if not files_have_same_content(file_src_path, candidate_path):
+                    continue
+
+                duplicate_name = candidate
+                break
+
+            if duplicate_name is None:
                 continue
 
-            file_rem = fn_duplicate
+            file_remove = duplicate_name
             file_keep = file_name
-            if len(file_rem) < len(file_keep):
-                file_rem, file_keep = file_keep, file_rem
+            if len(file_remove) < len(file_keep):
+                file_remove, file_keep = file_keep, file_remove
 
-            if file_rem == file_keep:
-                print(f"could not delete {file_rem}")
-                sys.exit(1)
+            remove_path = os.path.join(dir_name, file_remove)
+            deleted_paths.add(remove_path)
 
-            remove_path = f"{dir_name}/{file_rem}"
-            delete_list[remove_path] = True
-
-            print(f"[deleting]\t{file_rem}", end='\r')
-
+            if verbosity > 0:
+                print(f"[deleting]\t{file_remove}", end='\r')
             if not dry_run:
                 os.remove(remove_path)
-
-            print(f"[finished]\t{file_rem}\t(original: {file_keep})")
+            if verbosity > 0:
+                print(f"[finished]\t{file_remove}\t(original: {file_keep})")
 
             delete_count_total += 1
 
-    ss = (time() - start_time) / 60
-    print("checked {} \t deleted: {} \t took {:.2f} minutes".format(parse_count_total, delete_count_total, ss))
+    elapsed_minutes = (time() - start_time) / 60
+    if verbosity > 0:
+        print(
+            "checked {} \t deleted: {} \t took {:.2f} minutes".format(
+                parse_count_total,
+                delete_count_total,
+                elapsed_minutes,
+            )
+        )
+
+    return parse_count_total, delete_count_total
+
+
+def main(args: Sequence[str] | None = None) -> int:
+    args = list(sys.argv[1:] if args is None else args)
+    if len(args) < 1:
+        print("missing arguments, usage: python dedupe.py [src]")
+        return 1
+
+    src_dir = args[0]
+    if not os.path.isdir(src_dir):
+        print("source directory does not exist")
+        return 1
+
+    deduplicate(src_dir)
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

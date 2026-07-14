@@ -5,7 +5,17 @@ from shutil import copyfile, copystat
 from time import time
 from typing import Sequence
 
-from util.functions import get_exif_modify_time, is_media_extension
+from util.functions import files_have_same_content, get_exif_modify_time, is_media_extension
+
+
+def get_available_version_path(file_dst_dir: str, raw_file_name: str, ext: str) -> str:
+    suffix = f'-v{round(time())}'
+    candidate = os.path.join(file_dst_dir, raw_file_name + suffix + ext)
+    counter = 2
+    while os.path.exists(candidate):
+        candidate = os.path.join(file_dst_dir, f'{raw_file_name}{suffix}-{counter}{ext}')
+        counter += 1
+    return candidate
 
 
 def sync_media(
@@ -48,7 +58,8 @@ def sync_media(
                 continue
 
             file_dst_dir = os.path.join(dst_dir, last_modified.strftime('%Y/%-m/%-d'))
-            os.makedirs(file_dst_dir, exist_ok=True)
+            if not dry_run:
+                os.makedirs(file_dst_dir, exist_ok=True)
 
             time_prefix = last_modified.strftime('%Y%m%d-%H%M%S')
             raw_file_name = f"{time_prefix}-{''.join(file_name.split('.')[:-1])}"
@@ -58,24 +69,33 @@ def sync_media(
             if os.path.isfile(file_dst_path):
                 src_stat = os.stat(file_src_path)
                 dst_stat = os.stat(file_dst_path)
-                if dst_stat.st_mtime == src_stat.st_mtime and dst_stat.st_size == src_stat.st_size:
+                if (
+                    dst_stat.st_mtime == src_stat.st_mtime
+                    and dst_stat.st_size == src_stat.st_size
+                    and files_have_same_content(file_src_path, file_dst_path)
+                ):
                     skip_count += 1
                     skip_count_total += 1
                     if verbosity > 3:
                         print(f"skipped file: {full_file_name}")
                     continue
                 if dst_stat.st_size != 0:
-                    suffix = '-v' + str(round(time()))
-                    file_dst_path = os.path.join(file_dst_dir, raw_file_name + suffix + ext)
+                    file_dst_path = get_available_version_path(file_dst_dir, raw_file_name, ext)
 
             is_duplicate = False
-            for candidate in os.listdir(file_dst_dir):
+            candidates = os.listdir(file_dst_dir) if os.path.isdir(file_dst_dir) else []
+            for candidate in candidates:
                 if candidate.startswith(time_prefix):
+                    candidate_path = os.path.join(file_dst_dir, candidate)
+                    if not os.path.isfile(candidate_path):
+                        continue
                     src_stat = os.stat(file_src_path)
-                    dst_stat = os.stat(os.path.join(file_dst_dir, candidate))
+                    dst_stat = os.stat(candidate_path)
                     if src_stat.st_size != dst_stat.st_size:
                         continue
                     if src_stat.st_mtime != dst_stat.st_mtime:
+                        continue
+                    if not files_have_same_content(file_src_path, candidate_path):
                         continue
                     if verbosity > 2:
                         print(f"duplicate found: {candidate} -> {full_file_name}")
