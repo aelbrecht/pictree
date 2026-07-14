@@ -1,11 +1,19 @@
 import os
 import sys
 from datetime import datetime
-from shutil import copyfile, copystat
+from shutil import copystat
 from time import time
 from typing import Sequence
 
-from util.functions import files_have_same_content, get_exif_modify_time, is_media_extension
+from util.functions import get_exif_modify_time, is_media_extension
+from util.hashes import (
+    HASH_SUFFIX,
+    calculate_file_hash,
+    copy_file_with_hash,
+    get_or_create_file_hash,
+    read_hash_sidecar_record,
+    write_hash_sidecar,
+)
 
 
 def get_available_version_path(file_dst_dir: str, raw_file_name: str, ext: str) -> str:
@@ -65,27 +73,43 @@ def sync_media(
             raw_file_name = f"{time_prefix}-{''.join(file_name.split('.')[:-1])}"
             full_file_name = raw_file_name + ext
             file_dst_path = os.path.join(file_dst_dir, full_file_name)
+            source_hash: str | None = None
 
             if os.path.isfile(file_dst_path):
                 src_stat = os.stat(file_src_path)
                 dst_stat = os.stat(file_dst_path)
-                if (
-                    dst_stat.st_mtime == src_stat.st_mtime
-                    and dst_stat.st_size == src_stat.st_size
-                    and files_have_same_content(file_src_path, file_dst_path)
-                ):
-                    skip_count += 1
-                    skip_count_total += 1
-                    if verbosity > 3:
-                        print(f"skipped file: {full_file_name}")
-                    continue
+                if dst_stat.st_mtime == src_stat.st_mtime and dst_stat.st_size == src_stat.st_size:
+                    hash_record = read_hash_sidecar_record(file_dst_path)
+                    if hash_record is not None and hash_record.matches_file(dst_stat):
+                        has_valid_sidecar = True
+                        is_same_file = hash_record.matches_source(file_src_path, src_stat)
+                    else:
+                        has_valid_sidecar = False
+                        is_same_file = False
+                    if not has_valid_sidecar:
+                        is_same_file = True
+                        if not dry_run:
+                            source_hash = calculate_file_hash(file_src_path)
+                            write_hash_sidecar(file_dst_path, source_hash, source_path=file_src_path)
+                    elif not is_same_file:
+                        source_hash = calculate_file_hash(file_src_path)
+                        is_same_file = source_hash == hash_record.digest
+                        if is_same_file and not dry_run:
+                            write_hash_sidecar(file_dst_path, source_hash, source_path=file_src_path)
+
+                    if is_same_file:
+                        skip_count += 1
+                        skip_count_total += 1
+                        if verbosity > 3:
+                            print(f"skipped file: {full_file_name}")
+                        continue
                 if dst_stat.st_size != 0:
                     file_dst_path = get_available_version_path(file_dst_dir, raw_file_name, ext)
 
             is_duplicate = False
             candidates = os.listdir(file_dst_dir) if os.path.isdir(file_dst_dir) else []
             for candidate in candidates:
-                if candidate.startswith(time_prefix):
+                if candidate.startswith(time_prefix) and not candidate.endswith(HASH_SUFFIX):
                     candidate_path = os.path.join(file_dst_dir, candidate)
                     if not os.path.isfile(candidate_path):
                         continue
@@ -95,7 +119,10 @@ def sync_media(
                         continue
                     if src_stat.st_mtime != dst_stat.st_mtime:
                         continue
-                    if not files_have_same_content(file_src_path, candidate_path):
+                    candidate_hash = get_or_create_file_hash(candidate_path, persist=not dry_run)
+                    if source_hash is None:
+                        source_hash = calculate_file_hash(file_src_path)
+                    if source_hash != candidate_hash:
                         continue
                     if verbosity > 2:
                         print(f"duplicate found: {candidate} -> {full_file_name}")
@@ -111,12 +138,13 @@ def sync_media(
                 print(f" ==> [copying]\t{full_file_name}", end='\r')
 
             if not dry_run:
+                destination_hash = copy_file_with_hash(file_src_path, file_dst_path)
+                copystat(file_src_path, file_dst_path)
+                write_hash_sidecar(file_dst_path, destination_hash, source_path=file_src_path)
+
                 source_log_path = os.path.join(file_dst_dir, '.filesource')
                 with open(source_log_path, 'a+', encoding='utf-8') as source_log:
                     source_log.write(f"{file_src_path},{file_dst_path}\n")
-
-                copyfile(file_src_path, file_dst_path)
-                copystat(file_src_path, file_dst_path)
 
             if verbosity > 1:
                 print(f" ==> [finished]\t{full_file_name}")

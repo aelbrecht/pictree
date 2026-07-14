@@ -3,7 +3,8 @@ import sys
 from time import time
 from typing import Sequence
 
-from util.functions import files_have_same_content, is_media_extension
+from util.functions import is_media_extension
+from util.hashes import HASH_SUFFIX, get_or_create_file_hash, remove_hash_sidecar
 
 
 def deduplicate(src_dir: str, *, dry_run: bool = False, verbosity: int = 1) -> tuple[int, int]:
@@ -28,10 +29,12 @@ def deduplicate(src_dir: str, *, dry_run: bool = False, verbosity: int = 1) -> t
 
             time_prefix = file_name[:15]
             duplicate_name: str | None = None
+            source_hash: str | None = None
             for candidate in os.listdir(dir_name):
                 candidate_path = os.path.join(dir_name, candidate)
                 if (
                     not candidate.startswith(time_prefix)
+                    or candidate.endswith(HASH_SUFFIX)
                     or candidate == file_name
                     or candidate_path in deleted_paths
                     or not os.path.isfile(candidate_path)
@@ -49,7 +52,10 @@ def deduplicate(src_dir: str, *, dry_run: bool = False, verbosity: int = 1) -> t
                     continue
                 if src_stat.st_mtime != candidate_stat.st_mtime:
                     continue
-                if not files_have_same_content(file_src_path, candidate_path):
+                if source_hash is None:
+                    source_hash = get_or_create_file_hash(file_src_path, persist=not dry_run)
+                candidate_hash = get_or_create_file_hash(candidate_path, persist=not dry_run)
+                if source_hash != candidate_hash:
                     continue
 
                 duplicate_name = candidate
@@ -70,6 +76,7 @@ def deduplicate(src_dir: str, *, dry_run: bool = False, verbosity: int = 1) -> t
                 print(f"[deleting]\t{file_remove}", end='\r')
             if not dry_run:
                 os.remove(remove_path)
+                remove_hash_sidecar(remove_path)
             if verbosity > 0:
                 print(f"[finished]\t{file_remove}\t(original: {file_keep})")
 

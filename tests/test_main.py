@@ -32,6 +32,8 @@ class SyncMediaTests(unittest.TestCase):
         self.assertEqual(result, (1, 0))
         self.assertEqual(destination.read_bytes(), b'image contents')
         self.assertEqual(destination.stat().st_mtime, source.stat().st_mtime)
+        self.assertTrue(Path(str(destination) + '.sha1').is_file())
+        self.assertFalse(Path(str(source) + '.sha1').exists())
         self.assertEqual(
             (destination.parent / '.filesource').read_text(encoding='utf-8'),
             f'{source},{destination}\n',
@@ -57,11 +59,39 @@ class SyncMediaTests(unittest.TestCase):
 
         with patch('main.get_exif_modify_time', return_value=captured_at):
             first_result = main.sync_media(str(self.src_dir), str(self.dst_dir), verbosity=0)
-            second_result = main.sync_media(str(self.src_dir), str(self.dst_dir), verbosity=0)
+            with (
+                patch('main.calculate_file_hash') as calculate_hash,
+                patch('main.copy_file_with_hash') as copy_with_hash,
+            ):
+                second_result = main.sync_media(str(self.src_dir), str(self.dst_dir), verbosity=0)
 
         self.assertEqual(first_result, (1, 0))
         self.assertEqual(second_result, (0, 1))
+        calculate_hash.assert_not_called()
+        copy_with_hash.assert_not_called()
         self.assertEqual(len(list((self.dst_dir / '2024' / '2' / '3').glob('*.jpg'))), 1)
+
+    def test_seeds_missing_sidecar_from_source_without_reading_destination(self) -> None:
+        source = self.src_dir / 'photo.jpg'
+        source.write_bytes(b'image')
+        captured_at = datetime(2024, 2, 3, 4, 5, 6)
+
+        with patch('main.get_exif_modify_time', return_value=captured_at):
+            main.sync_media(str(self.src_dir), str(self.dst_dir), verbosity=0)
+
+        destination = self.dst_dir / '2024' / '2' / '3' / '20240203-040506-photo.jpg'
+        sidecar = Path(str(destination) + '.sha1')
+        sidecar.unlink()
+
+        with (
+            patch('main.get_exif_modify_time', return_value=captured_at),
+            patch('main.calculate_file_hash', return_value='a' * 40) as calculate_hash,
+        ):
+            result = main.sync_media(str(self.src_dir), str(self.dst_dir), verbosity=0)
+
+        self.assertEqual(result, (0, 1))
+        calculate_hash.assert_called_once_with(str(source))
+        self.assertTrue(sidecar.read_text(encoding='utf-8').startswith('a' * 40))
 
     def test_does_not_skip_different_content_with_matching_metadata(self) -> None:
         first_source = self.src_dir / 'first.jpg'

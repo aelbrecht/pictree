@@ -27,8 +27,10 @@ class DeduplicateTests(unittest.TestCase):
         self.assertEqual(result, (2, 0))
         self.assertTrue(first.exists())
         self.assertTrue(second.exists())
+        self.assertTrue(Path(str(first) + '.sha1').is_file())
+        self.assertTrue(Path(str(second) + '.sha1').is_file())
 
-    def test_deletes_only_byte_identical_duplicates(self) -> None:
+    def test_deletes_only_hash_identical_duplicates(self) -> None:
         original = self.create_candidate('20240101-000000-a.jpg', b'AAAA')
         duplicate = self.create_candidate('20240101-000000-long-name.jpg', b'AAAA')
 
@@ -37,6 +39,8 @@ class DeduplicateTests(unittest.TestCase):
         self.assertEqual(result[1], 1)
         self.assertTrue(original.exists())
         self.assertFalse(duplicate.exists())
+        self.assertTrue(Path(str(original) + '.sha1').is_file())
+        self.assertFalse(Path(str(duplicate) + '.sha1').exists())
 
     def test_dry_run_does_not_delete_duplicates(self) -> None:
         original = self.create_candidate('20240101-000000-a.jpg', b'AAAA')
@@ -47,3 +51,5 @@ class DeduplicateTests(unittest.TestCase):
         self.assertEqual(result[1], 1)
         self.assertTrue(original.exists())
         self.assertTrue(duplicate.exists())
+        self.assertFalse(Path(str(original) + '.sha1').exists())
+        self.assertFalse(Path(str(duplicate) + '.sha1').exists())

@@ -1,5 +1,4 @@
 import mimetypes
-import os
 import sys
 from collections.abc import Iterator
 from datetime import datetime
@@ -67,19 +66,3 @@ audio_ext = list(get_extensions_for_type('audio'))
 
 def is_media_extension(ext: str) -> bool:
     return ext in image_ext or ext in video_ext or ext in audio_ext
-
-
-def files_have_same_content(first_path: str, second_path: str, chunk_size: int = 1024 * 1024) -> bool:
-    if chunk_size <= 0:
-        raise ValueError("chunk_size must be positive")
-    if os.path.getsize(first_path) != os.path.getsize(second_path):
-        return False
-
-    with open(first_path, 'rb') as first_file, open(second_path, 'rb') as second_file:
-        while True:
-            first_chunk = first_file.read(chunk_size)
-            second_chunk = second_file.read(chunk_size)
-            if first_chunk != second_chunk:
-                return False
-            if not first_chunk:
-                return True
