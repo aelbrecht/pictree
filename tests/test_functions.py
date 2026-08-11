@@ -1,5 +1,8 @@
+import contextlib
+import io
 import tempfile
 import unittest
+import warnings
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -53,6 +56,44 @@ class GetExifModifyTimeTests(unittest.TestCase):
             result = get_exif_modify_time('photo.jpg', use_load=True)
 
         self.assertIsNone(result)
+
+    def test_preserves_existing_large_image_threshold(self) -> None:
+        self.assertEqual(Image.MAX_IMAGE_PIXELS, 933_120_000)
+
+    def test_allows_decompression_bomb_warning_for_exif_compatibility(self) -> None:
+        media = MagicMock()
+        media.getexif.return_value = {}
+        opened_image = MagicMock()
+        opened_image.__enter__.return_value = media
+
+        def warn_on_open(_path: str):
+            warnings.warn('image is too large', Image.DecompressionBombWarning)
+            return opened_image
+
+        with (
+            patch('util.functions.Image.open', side_effect=warn_on_open),
+            warnings.catch_warnings(record=True) as caught_warnings,
+        ):
+            warnings.simplefilter('always')
+            result = get_exif_modify_time('large.jpg')
+
+        self.assertIsNone(result)
+        self.assertEqual(len(caught_warnings), 1)
+        self.assertIs(caught_warnings[0].category, Image.DecompressionBombWarning)
+
+    def test_aborts_on_decompression_bomb_error(self) -> None:
+        output = io.StringIO()
+        with (
+            patch(
+                'util.functions.Image.open',
+                side_effect=Image.DecompressionBombError('image is too large'),
+            ),
+            contextlib.redirect_stdout(output),
+            self.assertRaises(SystemExit),
+        ):
+            get_exif_modify_time('large.jpg')
+
+        self.assertIn('image too large: large.jpg', output.getvalue())
 
 
 class IsMediaExtensionTests(unittest.TestCase):

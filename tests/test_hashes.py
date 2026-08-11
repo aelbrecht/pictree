@@ -2,7 +2,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from util import hashes
 
@@ -22,11 +22,179 @@ class HashTests(unittest.TestCase):
             source = Path(temp_dir, 'source.jpg')
             destination = Path(temp_dir, 'destination.jpg')
             source.write_bytes(b'image contents')
+            os.utime(source, (1000, 1000))
 
-            digest = hashes.copy_file_with_hash(str(source), str(destination))
+            result = hashes.copy_file_atomically_with_hash(str(source), str(destination))
 
             self.assertEqual(destination.read_bytes(), b'image contents')
-            self.assertEqual(digest, '1082f00eac56e0d0c5ea09091bc936dc2714f904')
+            self.assertEqual(result.digest, '1082f00eac56e0d0c5ea09091bc936dc2714f904')
+            self.assertEqual(destination.stat().st_mtime_ns, source.stat().st_mtime_ns)
+            self.assertEqual(result.source_stat.st_size, source.stat().st_size)
+            self.assertEqual(list(Path(temp_dir).glob('.pictree-copy-*.tmp')), [])
+            self.assertTrue(Path(str(destination) + hashes.HASH_SUFFIX).is_file())
+
+    def test_atomic_copy_cleans_up_after_keyboard_interrupt(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = Path(temp_dir, 'source.jpg')
+            destination = Path(temp_dir, 'destination.jpg')
+            source.write_bytes(b'image contents')
+            digest = MagicMock()
+            digest.update.side_effect = KeyboardInterrupt
+
+            with (
+                patch('util.hashes.new_hasher', return_value=digest),
+                self.assertRaises(KeyboardInterrupt),
+            ):
+                hashes.copy_file_atomically_with_hash(str(source), str(destination))
+
+            self.assertFalse(destination.exists())
+            self.assertEqual(list(Path(temp_dir).glob('.pictree-copy-*.tmp')), [])
+
+    def test_atomic_copy_cleans_up_when_metadata_copy_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = Path(temp_dir, 'source.jpg')
+            destination = Path(temp_dir, 'destination.jpg')
+            source.write_bytes(b'image contents')
+
+            with (
+                patch('util.hashes.copystat', side_effect=OSError('network error')),
+                self.assertRaises(OSError),
+            ):
+                hashes.copy_file_atomically_with_hash(str(source), str(destination))
+
+            self.assertFalse(destination.exists())
+            self.assertEqual(list(Path(temp_dir).glob('.pictree-copy-*.tmp')), [])
+
+    def test_atomic_copy_cleans_up_when_rename_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = Path(temp_dir, 'source.jpg')
+            destination = Path(temp_dir, 'destination.jpg')
+            source.write_bytes(b'image contents')
+            real_replace = hashes.os.replace
+
+            def fail_media_rename(source_path: str, destination_path: str) -> None:
+                if destination_path == str(destination):
+                    raise OSError('network error')
+                real_replace(source_path, destination_path)
+
+            with (
+                patch('util.hashes.os.replace', side_effect=fail_media_rename),
+                self.assertRaises(OSError),
+            ):
+                hashes.copy_file_atomically_with_hash(str(source), str(destination))
+
+            self.assertFalse(destination.exists())
+            self.assertEqual(list(Path(temp_dir).glob('.pictree-copy-*.tmp')), [])
+            self.assertTrue(Path(str(destination) + hashes.HASH_SUFFIX).is_file())
+
+            hashes.copy_file_atomically_with_hash(str(source), str(destination))
+
+            self.assertEqual(destination.read_bytes(), b'image contents')
+            record = hashes.read_hash_sidecar_record(str(destination))
+            self.assertIsNotNone(record)
+            assert record is not None
+            self.assertTrue(record.matches_file(destination.stat()))
+
+    def test_atomic_copy_never_overwrites_nonempty_destination(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = Path(temp_dir, 'source.jpg')
+            destination = Path(temp_dir, 'destination.jpg')
+            source.write_bytes(b'new contents')
+            destination.write_bytes(b'existing archive contents')
+
+            with self.assertRaises(hashes.DestinationChangedError):
+                hashes.copy_file_atomically_with_hash(str(source), str(destination))
+
+            self.assertEqual(destination.read_bytes(), b'existing archive contents')
+            self.assertEqual(list(Path(temp_dir).glob('.pictree-copy-*.tmp')), [])
+
+    def test_atomic_copy_replaces_legacy_zero_byte_destination_after_success(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = Path(temp_dir, 'source.jpg')
+            destination = Path(temp_dir, 'destination.jpg')
+            source.write_bytes(b'image contents')
+            destination.touch()
+
+            hashes.copy_file_atomically_with_hash(str(source), str(destination))
+
+            self.assertEqual(destination.read_bytes(), b'image contents')
+
+    def test_atomic_copy_leaves_zero_byte_destination_unchanged_after_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = Path(temp_dir, 'source.jpg')
+            destination = Path(temp_dir, 'destination.jpg')
+            source.write_bytes(b'image contents')
+            destination.touch()
+
+            with (
+                patch('util.hashes.copystat', side_effect=OSError('network error')),
+                self.assertRaises(OSError),
+            ):
+                hashes.copy_file_atomically_with_hash(str(source), str(destination))
+
+            self.assertTrue(destination.exists())
+            self.assertEqual(destination.read_bytes(), b'')
+            self.assertEqual(list(Path(temp_dir).glob('.pictree-copy-*.tmp')), [])
+
+    def test_atomic_copy_rejects_source_changes_before_commit(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = Path(temp_dir, 'source.jpg')
+            destination = Path(temp_dir, 'destination.jpg')
+            source.write_bytes(b'image contents')
+            real_copystat = hashes.copystat
+
+            def mutate_source(source_path: str, destination_path: str) -> None:
+                real_copystat(source_path, destination_path)
+                Path(source_path).write_bytes(b'changed while copying')
+
+            with (
+                patch('util.hashes.copystat', side_effect=mutate_source),
+                self.assertRaises(hashes.FileChangedError),
+            ):
+                hashes.copy_file_atomically_with_hash(str(source), str(destination))
+
+            self.assertFalse(destination.exists())
+            self.assertEqual(list(Path(temp_dir).glob('.pictree-copy-*.tmp')), [])
+
+    def test_atomic_copy_rejects_source_changes_during_streaming(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = Path(temp_dir, 'source.jpg')
+            destination = Path(temp_dir, 'destination.jpg')
+            source.write_bytes(b'image contents')
+            digest = MagicMock()
+
+            def mutate_source(_chunk: bytes) -> None:
+                source.write_bytes(b'changed while the source was open')
+
+            digest.update.side_effect = mutate_source
+            with (
+                patch('util.hashes.new_hasher', return_value=digest),
+                self.assertRaises(hashes.FileChangedError),
+            ):
+                hashes.copy_file_atomically_with_hash(str(source), str(destination))
+
+            self.assertFalse(destination.exists())
+            self.assertEqual(list(Path(temp_dir).glob('.pictree-copy-*.tmp')), [])
+
+    def test_atomic_copy_refuses_destination_created_during_copy(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = Path(temp_dir, 'source.jpg')
+            destination = Path(temp_dir, 'destination.jpg')
+            source.write_bytes(b'image contents')
+            real_copystat = hashes.copystat
+
+            def create_destination(source_path: str, temp_path: str) -> None:
+                real_copystat(source_path, temp_path)
+                destination.write_bytes(b'created by another process')
+
+            with (
+                patch('util.hashes.copystat', side_effect=create_destination),
+                self.assertRaises(hashes.DestinationChangedError),
+            ):
+                hashes.copy_file_atomically_with_hash(str(source), str(destination))
+
+            self.assertEqual(destination.read_bytes(), b'created by another process')
+            self.assertEqual(list(Path(temp_dir).glob('.pictree-copy-*.tmp')), [])
 
     def test_sidecar_records_hash_and_source_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -69,7 +237,12 @@ class HashTests(unittest.TestCase):
                 result = hashes.get_or_create_file_hash(str(file_path))
 
         self.assertEqual(result, 'b' * 40)
-        calculate_hash.assert_called_once_with(str(file_path))
+        calculate_hash.assert_called_once()
+        self.assertEqual(calculate_hash.call_args.args, (str(file_path),))
+        self.assertEqual(
+            calculate_hash.call_args.kwargs['expected_stat'].st_size,
+            len(b'new contents'),
+        )
 
 
 if __name__ == '__main__':

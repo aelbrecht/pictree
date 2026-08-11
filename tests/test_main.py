@@ -3,11 +3,14 @@ import io
 import os
 import tempfile
 import unittest
+from builtins import open as builtin_open
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
 import main
+from util import hashes
+from util.locking import DestinationLockedError, destination_lock
 
 
 class SyncMediaTests(unittest.TestCase):
@@ -61,7 +64,7 @@ class SyncMediaTests(unittest.TestCase):
             first_result = main.sync_media(str(self.src_dir), str(self.dst_dir), verbosity=0)
             with (
                 patch('main.calculate_file_hash') as calculate_hash,
-                patch('main.copy_file_with_hash') as copy_with_hash,
+                patch('main.copy_file_atomically_with_hash') as copy_with_hash,
             ):
                 second_result = main.sync_media(str(self.src_dir), str(self.dst_dir), verbosity=0)
 
@@ -90,8 +93,157 @@ class SyncMediaTests(unittest.TestCase):
             result = main.sync_media(str(self.src_dir), str(self.dst_dir), verbosity=0)
 
         self.assertEqual(result, (0, 1))
-        calculate_hash.assert_called_once_with(str(source))
+        calculate_hash.assert_called_once()
+        self.assertEqual(calculate_hash.call_args.args, (str(source),))
+        self.assertEqual(
+            calculate_hash.call_args.kwargs['expected_stat'].st_size,
+            source.stat().st_size,
+        )
         self.assertTrue(sidecar.read_text(encoding='utf-8').startswith('a' * 40))
+
+    def test_valid_sidecar_tolerates_rounded_destination_timestamp(self) -> None:
+        source = self.src_dir / 'photo.jpg'
+        source.write_bytes(b'image')
+        os.utime(source, ns=(1_700_000_000_123_456_789, 1_700_000_000_123_456_789))
+        captured_at = datetime(2024, 2, 3, 4, 5, 6)
+
+        with patch('main.get_exif_modify_time', return_value=captured_at):
+            main.sync_media(str(self.src_dir), str(self.dst_dir), verbosity=0)
+
+        destination = self.dst_dir / '2024' / '2' / '3' / '20240203-040506-photo.jpg'
+        rounded_mtime_ns = source.stat().st_mtime_ns // 1_000_000_000 * 1_000_000_000
+        os.utime(destination, ns=(rounded_mtime_ns, rounded_mtime_ns))
+        hashes.write_hash_sidecar(
+            str(destination),
+            hashes.calculate_file_hash(str(source)),
+            source_path=str(source),
+            source_stat=source.stat(),
+        )
+
+        with (
+            patch('main.get_exif_modify_time', return_value=captured_at),
+            patch('main.calculate_file_hash') as calculate_hash,
+            patch('main.copy_file_atomically_with_hash') as copy_file,
+        ):
+            result = main.sync_media(str(self.src_dir), str(self.dst_dir), verbosity=0)
+
+        self.assertEqual(result, (0, 1))
+        calculate_hash.assert_not_called()
+        copy_file.assert_not_called()
+        self.assertEqual(len(list(destination.parent.glob('*.jpg'))), 1)
+
+    def test_matching_hash_refreshes_sidecar_after_source_path_changes(self) -> None:
+        source = self.src_dir / 'photo.jpg'
+        source.write_bytes(b'image')
+        os.utime(source, (1000, 1000))
+        captured_at = datetime(2024, 2, 3, 4, 5, 6)
+
+        with patch('main.get_exif_modify_time', return_value=captured_at):
+            main.sync_media(str(self.src_dir), str(self.dst_dir), verbosity=0)
+
+        moved_source_dir = Path(self.temp_dir.name, 'moved-source')
+        moved_source_dir.mkdir()
+        moved_source = moved_source_dir / 'photo.jpg'
+        moved_source.write_bytes(b'image')
+        os.utime(moved_source, (2000, 2000))
+
+        with (
+            patch('main.get_exif_modify_time', return_value=captured_at),
+            patch('main.calculate_file_hash', wraps=main.calculate_file_hash) as calculate_hash,
+        ):
+            result = main.sync_media(str(moved_source_dir), str(self.dst_dir), verbosity=0)
+
+        destination = self.dst_dir / '2024' / '2' / '3' / '20240203-040506-photo.jpg'
+        record = hashes.read_hash_sidecar_record(str(destination))
+        self.assertEqual(result, (0, 1))
+        calculate_hash.assert_called_once()
+        self.assertEqual(len(list(destination.parent.glob('*.jpg'))), 1)
+        self.assertIsNotNone(record)
+        assert record is not None
+        self.assertTrue(record.matches_source(str(moved_source), moved_source.stat()))
+
+    def test_source_change_during_date_read_stops_before_writing_archive(self) -> None:
+        source = self.src_dir / 'photo.jpg'
+        source.write_bytes(b'original image')
+
+        def mutate_during_exif(_path: str) -> datetime:
+            source.write_bytes(b'changed image contents')
+            return datetime(2024, 2, 3, 4, 5, 6)
+
+        with (
+            patch('main.get_exif_modify_time', side_effect=mutate_during_exif),
+            self.assertRaises(hashes.FileChangedError),
+        ):
+            main.sync_media(str(self.src_dir), str(self.dst_dir), verbosity=0)
+
+        self.assertEqual(
+            [path for path in self.dst_dir.iterdir() if not path.name.startswith('.pictree-')],
+            [],
+        )
+
+    def test_sidecar_failure_does_not_publish_media_or_source_log(self) -> None:
+        source = self.src_dir / 'photo.jpg'
+        source.write_bytes(b'image contents')
+        captured_at = datetime(2024, 2, 3, 4, 5, 6)
+
+        with (
+            patch('main.get_exif_modify_time', return_value=captured_at),
+            patch(
+                'util.hashes._write_hash_sidecar_for_stat',
+                side_effect=OSError('network error'),
+            ),
+            self.assertRaises(OSError),
+        ):
+            main.sync_media(str(self.src_dir), str(self.dst_dir), verbosity=0)
+
+        destination = self.dst_dir / '2024' / '2' / '3' / '20240203-040506-photo.jpg'
+        self.assertFalse(destination.exists())
+        self.assertFalse(Path(str(destination) + '.sha1').exists())
+        self.assertFalse((destination.parent / '.filesource').exists())
+        self.assertEqual(list(destination.parent.glob('.pictree-copy-*.tmp')), [])
+
+        with patch('main.get_exif_modify_time', return_value=captured_at):
+            retry_result = main.sync_media(str(self.src_dir), str(self.dst_dir), verbosity=0)
+
+        self.assertEqual(retry_result, (1, 0))
+        self.assertTrue(Path(str(destination) + '.sha1').exists())
+        self.assertEqual(len(list(destination.parent.glob('*.jpg'))), 1)
+
+    def test_log_failure_after_rounded_copy_retries_without_duplicate(self) -> None:
+        source = self.src_dir / 'photo.jpg'
+        source.write_bytes(b'image contents')
+        os.utime(source, ns=(1_700_000_000_123_456_789, 1_700_000_000_123_456_789))
+        captured_at = datetime(2024, 2, 3, 4, 5, 6)
+        real_copystat = hashes.copystat
+
+        def round_destination_timestamp(source_path: str, destination_path: str) -> None:
+            real_copystat(source_path, destination_path)
+            rounded = os.stat(destination_path).st_mtime_ns // 1_000_000_000 * 1_000_000_000
+            os.utime(destination_path, ns=(rounded, rounded))
+
+        def fail_source_log(file, *args, **kwargs):
+            if os.fspath(file).endswith(os.sep + '.filesource'):
+                raise OSError('network error')
+            return builtin_open(file, *args, **kwargs)
+
+        with (
+            patch('main.get_exif_modify_time', return_value=captured_at),
+            patch('util.hashes.copystat', side_effect=round_destination_timestamp),
+            patch('builtins.open', side_effect=fail_source_log),
+            self.assertRaises(OSError),
+        ):
+            main.sync_media(str(self.src_dir), str(self.dst_dir), verbosity=0)
+
+        destination = self.dst_dir / '2024' / '2' / '3' / '20240203-040506-photo.jpg'
+        self.assertEqual(destination.read_bytes(), b'image contents')
+        self.assertTrue(Path(str(destination) + '.sha1').is_file())
+        self.assertNotEqual(destination.stat().st_mtime_ns, source.stat().st_mtime_ns)
+
+        with patch('main.get_exif_modify_time', return_value=captured_at):
+            retry_result = main.sync_media(str(self.src_dir), str(self.dst_dir), verbosity=0)
+
+        self.assertEqual(retry_result, (0, 1))
+        self.assertEqual(len(list(destination.parent.glob('*.jpg'))), 1)
 
     def test_does_not_skip_different_content_with_matching_metadata(self) -> None:
         first_source = self.src_dir / 'first.jpg'
@@ -167,16 +319,53 @@ class SyncMediaTests(unittest.TestCase):
         self.assertEqual(result, (1, 0))
         self.assertEqual(list(self.dst_dir.iterdir()), [])
 
+    def test_refuses_to_start_while_destination_is_locked(self) -> None:
+        (self.src_dir / 'photo.jpg').write_bytes(b'image')
+
+        with destination_lock(str(self.dst_dir)):
+            with self.assertRaises(DestinationLockedError):
+                main.sync_media(str(self.src_dir), str(self.dst_dir), verbosity=0)
+
+        self.assertFalse(any(path.name == '2024' for path in self.dst_dir.iterdir()))
+
+    def test_rejects_destination_inside_source_tree(self) -> None:
+        nested_destination = self.src_dir / 'archive'
+        nested_destination.mkdir()
+        (self.src_dir / 'photo.jpg').write_bytes(b'image')
+
+        with self.assertRaises(main.UnsafeSyncPathsError):
+            main.sync_media(str(self.src_dir), str(nested_destination), verbosity=0)
+
+        self.assertEqual(list(nested_destination.iterdir()), [])
+
+    def test_rejects_source_inside_destination_tree(self) -> None:
+        nested_source = self.dst_dir / 'imports'
+        nested_source.mkdir()
+        (nested_source / 'photo.jpg').write_bytes(b'image')
+
+        with self.assertRaises(main.UnsafeSyncPathsError):
+            main.sync_media(str(nested_source), str(self.dst_dir), verbosity=0)
+
+        self.assertFalse((self.dst_dir / '.pictree-sync.lock').exists())
+
     def test_skips_media_before_year_limit_and_ignores_unsupported_files(self) -> None:
         (self.src_dir / 'old.jpg').write_bytes(b'old image')
         (self.src_dir / 'notes.txt').write_text('not media', encoding='utf-8')
         (self.src_dir / '.hidden.jpg').write_bytes(b'hidden image')
 
         with patch('main.get_exif_modify_time', return_value=datetime(1999, 1, 1)):
-            result = main.sync_media(str(self.src_dir), str(self.dst_dir), year_limit=2000, verbosity=0)
+            result = main.sync_media(
+                str(self.src_dir),
+                str(self.dst_dir),
+                year_limit=2000,
+                verbosity=0,
+            )
 
         self.assertEqual(result, (0, 1))
-        self.assertEqual(list(self.dst_dir.iterdir()), [])
+        self.assertEqual(
+            [path for path in self.dst_dir.iterdir() if not path.name.startswith('.pictree-')],
+            [],
+        )
 
 
 class MainTests(unittest.TestCase):

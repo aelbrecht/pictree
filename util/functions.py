@@ -6,7 +6,7 @@ from xml.etree import ElementTree
 
 from PIL import Image, UnidentifiedImageError
 
-Image.MAX_IMAGE_PIXELS = 933120000
+Image.MAX_IMAGE_PIXELS = 933_120_000
 
 
 def get_exif_modify_time(path: str, use_load: bool = False) -> datetime | None:

@@ -1,19 +1,40 @@
 import os
 import sys
 from datetime import datetime
-from shutil import copystat
 from time import time
 from typing import Sequence
 
 from util.functions import get_exif_modify_time, is_media_extension
 from util.hashes import (
+    DestinationChangedError,
+    FileChangedError,
     HASH_SUFFIX,
     calculate_file_hash,
-    copy_file_with_hash,
+    copy_file_atomically_with_hash,
     get_or_create_file_hash,
     read_hash_sidecar_record,
+    require_file_unchanged,
     write_hash_sidecar,
 )
+from util.locking import DestinationLockedError, destination_lock
+
+
+class UnsafeSyncPathsError(ValueError):
+    """Raised when source and destination directory trees overlap."""
+
+
+def require_separate_directory_trees(source_dir: str, destination_dir: str) -> None:
+    source_real_path = os.path.realpath(source_dir)
+    destination_real_path = os.path.realpath(destination_dir)
+    try:
+        common_path = os.path.commonpath([source_real_path, destination_real_path])
+    except ValueError:
+        return
+    if common_path in (source_real_path, destination_real_path):
+        raise UnsafeSyncPathsError(
+            'source and destination directory trees must not overlap: '
+            f'{source_dir} -> {destination_dir}'
+        )
 
 
 def get_available_version_path(file_dst_dir: str, raw_file_name: str, ext: str) -> str:
@@ -26,7 +47,112 @@ def get_available_version_path(file_dst_dir: str, raw_file_name: str, ext: str) 
     return candidate
 
 
+def destination_matches_source(
+    source_path: str,
+    source_stat: os.stat_result,
+    destination_path: str,
+    destination_stat: os.stat_result,
+    source_hash: str | None,
+    *,
+    persist_sidecar: bool,
+    trust_legacy_metadata: bool,
+) -> tuple[bool, str | None]:
+    if source_stat.st_size != destination_stat.st_size:
+        return False, source_hash
+
+    hash_record = read_hash_sidecar_record(destination_path)
+    has_valid_sidecar = hash_record is not None and hash_record.matches_file(destination_stat)
+    if has_valid_sidecar:
+        assert hash_record is not None
+        if hash_record.matches_source(source_path, source_stat):
+            require_file_unchanged(source_path, source_stat)
+            require_file_unchanged(destination_path, destination_stat)
+            return True, source_hash
+        if source_hash is None:
+            source_hash = calculate_file_hash(source_path, expected_stat=source_stat)
+        if source_hash != hash_record.digest:
+            return False, source_hash
+        if persist_sidecar:
+            write_hash_sidecar(
+                destination_path,
+                source_hash,
+                source_path=source_path,
+                source_stat=source_stat,
+                expected_file_stat=destination_stat,
+            )
+        else:
+            require_file_unchanged(source_path, source_stat)
+            require_file_unchanged(destination_path, destination_stat)
+        return True, source_hash
+
+    if destination_stat.st_mtime != source_stat.st_mtime:
+        return False, source_hash
+
+    if source_hash is None and (persist_sidecar or not trust_legacy_metadata):
+        source_hash = calculate_file_hash(source_path, expected_stat=source_stat)
+
+    if not trust_legacy_metadata:
+        destination_hash = get_or_create_file_hash(destination_path, persist=persist_sidecar)
+        if source_hash != destination_hash:
+            return False, source_hash
+        if persist_sidecar:
+            assert source_hash is not None
+            write_hash_sidecar(
+                destination_path,
+                source_hash,
+                source_path=source_path,
+                source_stat=source_stat,
+                expected_file_stat=destination_stat,
+            )
+        else:
+            require_file_unchanged(source_path, source_stat)
+            require_file_unchanged(destination_path, destination_stat)
+        return True, source_hash
+
+    # Preserve the canonical legacy fast path: matching size and timestamp are
+    # trusted when an existing archive file has no usable pictree sidecar.
+    if persist_sidecar:
+        assert source_hash is not None
+        write_hash_sidecar(
+            destination_path,
+            source_hash,
+            source_path=source_path,
+            source_stat=source_stat,
+            expected_file_stat=destination_stat,
+        )
+    else:
+        require_file_unchanged(source_path, source_stat)
+    return True, source_hash
+
+
 def sync_media(
+    src_dir: str,
+    dst_dir: str,
+    year_limit: int = 0,
+    *,
+    dry_run: bool = False,
+    verbosity: int = 2,
+) -> tuple[int, int]:
+    require_separate_directory_trees(src_dir, dst_dir)
+    if dry_run:
+        return _sync_media_unlocked(
+            src_dir,
+            dst_dir,
+            year_limit,
+            dry_run=True,
+            verbosity=verbosity,
+        )
+    with destination_lock(dst_dir):
+        return _sync_media_unlocked(
+            src_dir,
+            dst_dir,
+            year_limit,
+            dry_run=False,
+            verbosity=verbosity,
+        )
+
+
+def _sync_media_unlocked(
     src_dir: str,
     dst_dir: str,
     year_limit: int = 0,
@@ -56,9 +182,11 @@ def sync_media(
                 continue
 
             file_src_path = os.path.join(dir_name, file_name)
+            src_stat = os.stat(file_src_path)
             last_modified = get_exif_modify_time(file_src_path)
+            require_file_unchanged(file_src_path, src_stat)
             if last_modified is None:
-                last_modified = datetime.fromtimestamp(os.path.getmtime(file_src_path))
+                last_modified = datetime.fromtimestamp(src_stat.st_mtime)
 
             if last_modified.year < year_limit:
                 skip_count += 1
@@ -76,33 +204,22 @@ def sync_media(
             source_hash: str | None = None
 
             if os.path.isfile(file_dst_path):
-                src_stat = os.stat(file_src_path)
                 dst_stat = os.stat(file_dst_path)
-                if dst_stat.st_mtime == src_stat.st_mtime and dst_stat.st_size == src_stat.st_size:
-                    hash_record = read_hash_sidecar_record(file_dst_path)
-                    if hash_record is not None and hash_record.matches_file(dst_stat):
-                        has_valid_sidecar = True
-                        is_same_file = hash_record.matches_source(file_src_path, src_stat)
-                    else:
-                        has_valid_sidecar = False
-                        is_same_file = False
-                    if not has_valid_sidecar:
-                        is_same_file = True
-                        if not dry_run:
-                            source_hash = calculate_file_hash(file_src_path)
-                            write_hash_sidecar(file_dst_path, source_hash, source_path=file_src_path)
-                    elif not is_same_file:
-                        source_hash = calculate_file_hash(file_src_path)
-                        is_same_file = source_hash == hash_record.digest
-                        if is_same_file and not dry_run:
-                            write_hash_sidecar(file_dst_path, source_hash, source_path=file_src_path)
-
-                    if is_same_file:
-                        skip_count += 1
-                        skip_count_total += 1
-                        if verbosity > 3:
-                            print(f"skipped file: {full_file_name}")
-                        continue
+                is_same_file, source_hash = destination_matches_source(
+                    file_src_path,
+                    src_stat,
+                    file_dst_path,
+                    dst_stat,
+                    source_hash,
+                    persist_sidecar=not dry_run,
+                    trust_legacy_metadata=True,
+                )
+                if is_same_file:
+                    skip_count += 1
+                    skip_count_total += 1
+                    if verbosity > 3:
+                        print(f"skipped file: {full_file_name}")
+                    continue
                 if dst_stat.st_size != 0:
                     file_dst_path = get_available_version_path(file_dst_dir, raw_file_name, ext)
 
@@ -113,16 +230,17 @@ def sync_media(
                     candidate_path = os.path.join(file_dst_dir, candidate)
                     if not os.path.isfile(candidate_path):
                         continue
-                    src_stat = os.stat(file_src_path)
                     dst_stat = os.stat(candidate_path)
-                    if src_stat.st_size != dst_stat.st_size:
-                        continue
-                    if src_stat.st_mtime != dst_stat.st_mtime:
-                        continue
-                    candidate_hash = get_or_create_file_hash(candidate_path, persist=not dry_run)
-                    if source_hash is None:
-                        source_hash = calculate_file_hash(file_src_path)
-                    if source_hash != candidate_hash:
+                    is_same_file, source_hash = destination_matches_source(
+                        file_src_path,
+                        src_stat,
+                        candidate_path,
+                        dst_stat,
+                        source_hash,
+                        persist_sidecar=not dry_run,
+                        trust_legacy_metadata=False,
+                    )
+                    if not is_same_file:
                         continue
                     if verbosity > 2:
                         print(f"duplicate found: {candidate} -> {full_file_name}")
@@ -138,9 +256,11 @@ def sync_media(
                 print(f" ==> [copying]\t{full_file_name}", end='\r')
 
             if not dry_run:
-                destination_hash = copy_file_with_hash(file_src_path, file_dst_path)
-                copystat(file_src_path, file_dst_path)
-                write_hash_sidecar(file_dst_path, destination_hash, source_path=file_src_path)
+                copy_file_atomically_with_hash(
+                    file_src_path,
+                    file_dst_path,
+                    expected_source_stat=src_stat,
+                )
 
                 source_log_path = os.path.join(file_dst_dir, '.filesource')
                 with open(source_log_path, 'a+', encoding='utf-8') as source_log:
@@ -197,7 +317,16 @@ def main(args: Sequence[str] | None = None) -> int:
             return 1
         year_limit = int(year)
 
-    sync_media(src_dir, dst_dir, year_limit)
+    try:
+        sync_media(src_dir, dst_dir, year_limit)
+    except (
+        DestinationLockedError,
+        DestinationChangedError,
+        FileChangedError,
+        UnsafeSyncPathsError,
+    ) as error:
+        print(f'sync stopped safely: {error}')
+        return 1
     return 0
 
 

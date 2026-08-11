@@ -5,9 +5,22 @@ from typing import Sequence
 
 from util.functions import is_media_extension
 from util.hashes import HASH_SUFFIX, get_or_create_file_hash, remove_hash_sidecar
+from util.locking import DestinationLockedError, destination_lock
 
 
 def deduplicate(src_dir: str, *, dry_run: bool = False, verbosity: int = 1) -> tuple[int, int]:
+    if dry_run:
+        return _deduplicate_unlocked(src_dir, dry_run=True, verbosity=verbosity)
+    with destination_lock(src_dir):
+        return _deduplicate_unlocked(src_dir, dry_run=False, verbosity=verbosity)
+
+
+def _deduplicate_unlocked(
+    src_dir: str,
+    *,
+    dry_run: bool,
+    verbosity: int,
+) -> tuple[int, int]:
     deleted_paths: set[str] = set()
     delete_count_total = 0
     parse_count_total = 0
@@ -106,7 +119,11 @@ def main(args: Sequence[str] | None = None) -> int:
         print("source directory does not exist")
         return 1
 
-    deduplicate(src_dir)
+    try:
+        deduplicate(src_dir)
+    except DestinationLockedError as error:
+        print(f'deduplication stopped safely: {error}')
+        return 1
     return 0
 
 
