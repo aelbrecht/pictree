@@ -55,6 +55,22 @@ class AuditArchiveTests(unittest.TestCase):
         self.assertEqual(report.missing_sidecars, 1)
         self.assertEqual(report.finding_count, 0)
 
+    def test_prepared_receipt_is_not_reported_as_valid(self) -> None:
+        media = self.create_media()
+        hashes._write_hash_sidecar_for_stat(
+            str(media),
+            str(media),
+            hashes.calculate_file_hash(str(media)),
+            media.stat(),
+            prepared=True,
+        )
+
+        report = audit.audit_archive(str(self.archive))
+
+        self.assertEqual(report.valid_sidecars, 0)
+        self.assertEqual(report.finding_counts['stale_sidecar'], 1)
+        self.assertIn('prepared but not finalized', report.examples[0].detail)
+
     def test_reports_zero_byte_orphan_invalid_and_stale_files(self) -> None:
         zero_byte = self.create_media('zero.jpg', b'')
         stale = self.create_media('stale.jpg', b'original')

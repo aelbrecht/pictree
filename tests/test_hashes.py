@@ -196,6 +196,88 @@ class HashTests(unittest.TestCase):
             self.assertEqual(destination.read_bytes(), b'created by another process')
             self.assertEqual(list(Path(temp_dir).glob('.pictree-copy-*.tmp')), [])
 
+    def test_atomic_copy_rejects_post_rename_size_change(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = Path(temp_dir, 'source.jpg')
+            destination = Path(temp_dir, 'destination.jpg')
+            source.write_bytes(b'image contents')
+            real_replace = hashes.os.replace
+
+            def replace_then_truncate(source_path: str, destination_path: str) -> None:
+                real_replace(source_path, destination_path)
+                if destination_path == str(destination):
+                    destination.write_bytes(b'x')
+
+            with (
+                patch('util.hashes.os.replace', side_effect=replace_then_truncate),
+                self.assertRaises(hashes.DestinationChangedError),
+            ):
+                hashes.copy_file_atomically_with_hash(str(source), str(destination))
+
+            self.assertEqual(destination.read_bytes(), b'x')
+            self.assertEqual(list(Path(temp_dir).glob('.pictree-copy-*.tmp')), [])
+
+    def test_atomic_copy_rejects_post_rename_same_size_replacement(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = Path(temp_dir, 'source.jpg')
+            destination = Path(temp_dir, 'destination.jpg')
+            replacement = Path(temp_dir, 'replacement.jpg')
+            source.write_bytes(b'AAAA')
+            real_replace = hashes.os.replace
+
+            def replace_then_swap_file(source_path: str, destination_path: str) -> None:
+                real_replace(source_path, destination_path)
+                if destination_path == str(destination):
+                    replacement.write_bytes(b'BBBB')
+                    hashes.copystat(str(source), str(replacement))
+                    real_replace(replacement, destination_path)
+
+            with (
+                patch('util.hashes.os.replace', side_effect=replace_then_swap_file),
+                self.assertRaises(hashes.DestinationChangedError),
+            ):
+                hashes.copy_file_atomically_with_hash(str(source), str(destination))
+
+            self.assertEqual(destination.read_bytes(), b'BBBB')
+            self.assertEqual(list(Path(temp_dir).glob('.pictree-copy-*.tmp')), [])
+            record = hashes.read_hash_sidecar_record(str(destination))
+            self.assertIsNotNone(record)
+            assert record is not None
+            self.assertTrue(record.prepared)
+            self.assertFalse(record.matches_file(destination.stat()))
+
+    def test_atomic_copy_verifies_content_when_rename_changes_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = Path(temp_dir, 'source.jpg')
+            destination = Path(temp_dir, 'destination.jpg')
+            replacement = Path(temp_dir, 'replacement.jpg')
+            source.write_bytes(b'AAAA')
+            real_replace = hashes.os.replace
+
+            def replace_then_swap_file(source_path: str, destination_path: str) -> None:
+                real_replace(source_path, destination_path)
+                if destination_path == str(destination):
+                    replacement.write_bytes(b'AAAA')
+                    real_replace(replacement, destination_path)
+
+            with (
+                patch('util.hashes.os.replace', side_effect=replace_then_swap_file),
+                patch(
+                    'util.hashes.calculate_file_hash',
+                    wraps=hashes.calculate_file_hash,
+                ) as calculate_hash,
+            ):
+                result = hashes.copy_file_atomically_with_hash(str(source), str(destination))
+
+            self.assertEqual(destination.read_bytes(), b'AAAA')
+            calculate_hash.assert_called_once()
+            self.assertEqual(calculate_hash.call_args.args, (str(destination),))
+            record = hashes.read_hash_sidecar_record(str(destination))
+            self.assertIsNotNone(record)
+            assert record is not None
+            self.assertEqual(record.digest, result.digest)
+            self.assertTrue(record.matches_file(destination.stat()))
+
     def test_sidecar_records_hash_and_source_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             source = Path(temp_dir, 'source.jpg')
@@ -225,6 +307,13 @@ class HashTests(unittest.TestCase):
 
         self.assertEqual(result, 'a' * 40)
         calculate_hash.assert_not_called()
+
+    def test_sidecar_read_propagates_io_errors(self) -> None:
+        with (
+            patch('builtins.open', side_effect=PermissionError('sidecar unavailable')),
+            self.assertRaises(PermissionError),
+        ):
+            hashes.read_hash_sidecar_record('/archive/photo.jpg')
 
     def test_recalculates_a_stale_sidecar(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -11,7 +11,6 @@ from util.hashes import (
     HASH_SUFFIX,
     calculate_file_hash,
     copy_file_atomically_with_hash,
-    get_or_create_file_hash,
     read_hash_sidecar_record,
     require_file_unchanged,
     write_hash_sidecar,
@@ -23,14 +22,28 @@ class UnsafeSyncPathsError(ValueError):
     """Raised when source and destination directory trees overlap."""
 
 
+def _directory_identity(directory_path: str) -> tuple[int, int]:
+    directory_stat = os.stat(directory_path)
+    return directory_stat.st_dev, directory_stat.st_ino
+
+
+def _directory_tree_contains(parent_dir: str, candidate_dir: str) -> bool:
+    parent_identity = _directory_identity(os.path.realpath(parent_dir))
+    current_path = os.path.realpath(candidate_dir)
+    while True:
+        if _directory_identity(current_path) == parent_identity:
+            return True
+        parent_path = os.path.dirname(current_path)
+        if parent_path == current_path:
+            return False
+        current_path = parent_path
+
+
 def require_separate_directory_trees(source_dir: str, destination_dir: str) -> None:
-    source_real_path = os.path.realpath(source_dir)
-    destination_real_path = os.path.realpath(destination_dir)
-    try:
-        common_path = os.path.commonpath([source_real_path, destination_real_path])
-    except ValueError:
-        return
-    if common_path in (source_real_path, destination_real_path):
+    if _directory_tree_contains(source_dir, destination_dir) or _directory_tree_contains(
+        destination_dir,
+        source_dir,
+    ):
         raise UnsafeSyncPathsError(
             'source and destination directory trees must not overlap: '
             f'{source_dir} -> {destination_dir}'
@@ -56,11 +69,15 @@ def destination_matches_source(
     *,
     persist_sidecar: bool,
     trust_legacy_metadata: bool,
+    verbosity: int = 0,
 ) -> tuple[bool, str | None]:
     if source_stat.st_size != destination_stat.st_size:
         return False, source_hash
 
     hash_record = read_hash_sidecar_record(destination_path)
+    has_unusable_sidecar = hash_record is None and os.path.lexists(
+        destination_path + HASH_SUFFIX
+    )
     has_valid_sidecar = hash_record is not None and hash_record.matches_file(destination_stat)
     if has_valid_sidecar:
         assert hash_record is not None
@@ -85,18 +102,55 @@ def destination_matches_source(
             require_file_unchanged(destination_path, destination_stat)
         return True, source_hash
 
-    if destination_stat.st_mtime != source_stat.st_mtime:
-        return False, source_hash
+    # A receipt is prepared before the atomic media rename. Network filesystems
+    # can normalize mtime during that rename, or the process can stop before the
+    # receipt is refreshed with the final metadata. Verify this exceptional
+    # state by reading the destination once; never trust matching size alone.
+    if hash_record is not None:
+        if verbosity > 1:
+            print(f" ==> [verifying receipt]\t{os.path.basename(destination_path)}")
+        destination_hash = calculate_file_hash(
+            destination_path,
+            expected_stat=destination_stat,
+        )
+        if (
+            destination_hash != hash_record.digest
+            or not hash_record.matches_source(source_path, source_stat)
+        ):
+            if source_hash is None:
+                source_hash = calculate_file_hash(source_path, expected_stat=source_stat)
+            if source_hash != destination_hash:
+                if persist_sidecar:
+                    write_hash_sidecar(
+                        destination_path,
+                        destination_hash,
+                        expected_file_stat=destination_stat,
+                    )
+                else:
+                    require_file_unchanged(source_path, source_stat)
+                    require_file_unchanged(destination_path, destination_stat)
+                return False, source_hash
 
-    if source_hash is None and (persist_sidecar or not trust_legacy_metadata):
-        source_hash = calculate_file_hash(source_path, expected_stat=source_stat)
-
-    if not trust_legacy_metadata:
-        destination_hash = get_or_create_file_hash(destination_path, persist=persist_sidecar)
-        if source_hash != destination_hash:
-            return False, source_hash
         if persist_sidecar:
-            assert source_hash is not None
+            write_hash_sidecar(
+                destination_path,
+                destination_hash,
+                source_path=source_path,
+                source_stat=source_stat,
+                expected_file_stat=destination_stat,
+            )
+        else:
+            require_file_unchanged(source_path, source_stat)
+            require_file_unchanged(destination_path, destination_stat)
+        return True, source_hash
+
+    # Preserve the canonical legacy fast path: matching size and timestamp are
+    # trusted when an existing archive file has no usable pictree sidecar.
+    metadata_matches = destination_stat.st_mtime == source_stat.st_mtime
+    if metadata_matches and trust_legacy_metadata and not has_unusable_sidecar:
+        if persist_sidecar:
+            if source_hash is None:
+                source_hash = calculate_file_hash(source_path, expected_stat=source_stat)
             write_hash_sidecar(
                 destination_path,
                 source_hash,
@@ -109,10 +163,30 @@ def destination_matches_source(
             require_file_unchanged(destination_path, destination_stat)
         return True, source_hash
 
-    # Preserve the canonical legacy fast path: matching size and timestamp are
-    # trusted when an existing archive file has no usable pictree sidecar.
+    # SMB and similar filesystems may replace legacy destination mtimes with
+    # the copy time. Verify each such legacy file once rather than recopying it
+    # or trusting ambiguous .filesource entries. The persisted receipt makes
+    # all later runs metadata-only for this file.
+    if verbosity > 1:
+        print(f" ==> [verifying legacy]\t{os.path.basename(destination_path)}")
+    if source_hash is None:
+        source_hash = calculate_file_hash(source_path, expected_stat=source_stat)
+    destination_hash = calculate_file_hash(
+        destination_path,
+        expected_stat=destination_stat,
+    )
+    if source_hash != destination_hash:
+        if persist_sidecar:
+            write_hash_sidecar(
+                destination_path,
+                destination_hash,
+                expected_file_stat=destination_stat,
+            )
+        else:
+            require_file_unchanged(source_path, source_stat)
+            require_file_unchanged(destination_path, destination_stat)
+        return False, source_hash
     if persist_sidecar:
-        assert source_hash is not None
         write_hash_sidecar(
             destination_path,
             source_hash,
@@ -122,6 +196,7 @@ def destination_matches_source(
         )
     else:
         require_file_unchanged(source_path, source_stat)
+        require_file_unchanged(destination_path, destination_stat)
     return True, source_hash
 
 
@@ -202,8 +277,10 @@ def _sync_media_unlocked(
             full_file_name = raw_file_name + ext
             file_dst_path = os.path.join(file_dst_dir, full_file_name)
             source_hash: str | None = None
+            checked_destination_paths: set[str] = set()
 
             if os.path.isfile(file_dst_path):
+                checked_destination_paths.add(file_dst_path)
                 dst_stat = os.stat(file_dst_path)
                 is_same_file, source_hash = destination_matches_source(
                     file_src_path,
@@ -213,6 +290,7 @@ def _sync_media_unlocked(
                     source_hash,
                     persist_sidecar=not dry_run,
                     trust_legacy_metadata=True,
+                    verbosity=verbosity,
                 )
                 if is_same_file:
                     skip_count += 1
@@ -228,6 +306,8 @@ def _sync_media_unlocked(
             for candidate in candidates:
                 if candidate.startswith(time_prefix) and not candidate.endswith(HASH_SUFFIX):
                     candidate_path = os.path.join(file_dst_dir, candidate)
+                    if candidate_path in checked_destination_paths:
+                        continue
                     if not os.path.isfile(candidate_path):
                         continue
                     dst_stat = os.stat(candidate_path)
@@ -239,6 +319,7 @@ def _sync_media_unlocked(
                         source_hash,
                         persist_sidecar=not dry_run,
                         trust_legacy_metadata=False,
+                        verbosity=verbosity,
                     )
                     if not is_same_file:
                         continue

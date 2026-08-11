@@ -40,9 +40,14 @@ class HashSidecar:
     source_path: str | None = None
     source_size: int | None = None
     source_mtime_ns: int | None = None
+    prepared: bool = False
 
     def matches_file(self, file_stat: os.stat_result) -> bool:
-        return self.file_size == file_stat.st_size and self.file_mtime_ns == file_stat.st_mtime_ns
+        return (
+            not self.prepared
+            and self.file_size == file_stat.st_size
+            and self.file_mtime_ns == file_stat.st_mtime_ns
+        )
 
     def matches_source(self, source_path: str, source_stat: os.stat_result) -> bool:
         return (
@@ -185,18 +190,53 @@ def copy_file_atomically_with_hash(
                 committed_temp_stat,
                 source_path=source_path,
                 source_stat=opened_source_stat,
+                prepared=True,
             )
             require_file_unchanged(source_path, opened_source_stat)
             _require_destination_unchanged(destination_path, initial_destination_stat)
             os.replace(temp_path, destination_path)
-            committed_destination_stat = os.stat(destination_path)
+            committed_destination_stat = _destination_stat(destination_path)
             if (
-                committed_destination_stat.st_size != committed_temp_stat.st_size
-                or committed_destination_stat.st_mtime_ns != committed_temp_stat.st_mtime_ns
+                committed_destination_stat is None
+                or not stat.S_ISREG(committed_destination_stat.st_mode)
+                or committed_destination_stat.st_size != committed_temp_stat.st_size
             ):
                 raise DestinationChangedError(
-                    f'destination changed immediately after copying: {destination_path}'
+                    'destination type or size changed immediately after copying: '
+                    f'{destination_path}'
                 )
+
+            same_file_identity = (
+                committed_temp_stat.st_ino != 0
+                and committed_destination_stat.st_ino != 0
+                and committed_destination_stat.st_dev == committed_temp_stat.st_dev
+                and committed_destination_stat.st_ino == committed_temp_stat.st_ino
+            )
+            if not same_file_identity:
+                destination_digest = calculate_file_hash(
+                    destination_path,
+                    expected_stat=committed_destination_stat,
+                )
+                if destination_digest != copied_digest:
+                    raise DestinationChangedError(
+                        'destination identity or content changed immediately after copying: '
+                        f'{destination_path}'
+                    )
+
+            # Some network filesystems, including macOS SMB mounts, replace the
+            # temporary file successfully but normalize its mtime during the
+            # final rename. Record the metadata that the final path actually
+            # exposes instead of treating that normalization as content loss.
+            # The receipt written before the rename remains recoverable if this
+            # final refresh is interrupted.
+            _write_hash_sidecar_for_stat(
+                destination_path,
+                destination_path,
+                copied_digest,
+                committed_destination_stat,
+                source_path=source_path,
+                source_stat=opened_source_stat,
+            )
         except BaseException:
             try:
                 os.remove(temp_path)
@@ -215,7 +255,9 @@ def read_hash_sidecar_record(file_path: str) -> HashSidecar | None:
     try:
         with open(hash_sidecar_path(file_path), encoding='utf-8') as sidecar:
             lines = sidecar.readlines()
-    except (OSError, UnicodeError):
+    except FileNotFoundError:
+        return None
+    except UnicodeError:
         return None
 
     parts = lines[0].split() if lines else []
@@ -229,6 +271,9 @@ def read_hash_sidecar_record(file_path: str) -> HashSidecar | None:
         return HashSidecar(digest=digest)
     try:
         metadata = json.loads(lines[1].removeprefix('# pictree '))
+        prepared = metadata.get('prepared', False)
+        if not isinstance(prepared, bool):
+            raise ValueError('invalid prepared state')
         return HashSidecar(
             digest=digest,
             file_size=metadata['file_size'],
@@ -236,6 +281,7 @@ def read_hash_sidecar_record(file_path: str) -> HashSidecar | None:
             source_path=metadata.get('source_path'),
             source_size=metadata.get('source_size'),
             source_mtime_ns=metadata.get('source_mtime_ns'),
+            prepared=prepared,
         )
     except (KeyError, TypeError, ValueError):
         return HashSidecar(digest=digest)
@@ -254,6 +300,7 @@ def _write_hash_sidecar_for_stat(
     *,
     source_path: str | None = None,
     source_stat: os.stat_result | None = None,
+    prepared: bool = False,
 ) -> None:
     sidecar_path = hash_sidecar_path(sidecar_file_path)
     sidecar_dir = os.path.dirname(sidecar_path) or '.'
@@ -270,6 +317,8 @@ def _write_hash_sidecar_for_stat(
                 'file_size': file_stat.st_size,
                 'file_mtime_ns': file_stat.st_mtime_ns,
             }
+            if prepared:
+                metadata['prepared'] = True
             if source_path is not None:
                 if source_stat is None:
                     source_stat = os.stat(source_path)

@@ -16,7 +16,15 @@ prevent the archive from recursively copying itself.
 
 Each copied destination file gets a `filename.ext.sha1` sidecar. The hash is calculated while the source is already being
 copied, so it does not add another file read. Existing destination files without sidecars require one source-side hash to
-seed the sidecar; subsequent syncs reuse it and do not reread the media over the network.
+seed the sidecar when size and timestamp still match. If a network filesystem changed a legacy destination timestamp,
+Pictree verifies that source and destination once before seeding the sidecar. This migration is incremental across runs;
+subsequent syncs reuse each receipt and do not reread that media over the network. The first migration run may therefore
+read a large part of an existing archive, but it is safe to cancel and resume; completed receipts are retained.
+
+Some network filesystems normalize modification times during the final rename. Pictree records the metadata exposed by
+the final destination instead of treating that timestamp change as a failed copy. If an interruption leaves a prepared
+receipt with the earlier timestamp, Pictree verifies only that destination once before trusting and refreshing its
+receipt.
 
 New media is first written to a hidden temporary file in the destination directory. Pictree only moves that file to its
 final archive name after the complete copy, source metadata, and checksum receipt have been validated. A normal

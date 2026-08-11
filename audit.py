@@ -131,12 +131,15 @@ def _parse_sidecar(sidecar_path: str) -> ParsedSidecar:
     source_path = metadata.get('source_path')
     source_size = metadata.get('source_size')
     source_mtime_ns = metadata.get('source_mtime_ns')
+    prepared = metadata.get('prepared', False)
     if source_path is not None and not isinstance(source_path, str):
         raise ValueError('invalid source_path metadata')
     if source_size is not None and (not _is_valid_integer(source_size) or source_size < 0):
         raise ValueError('invalid source_size metadata')
     if source_mtime_ns is not None and not _is_valid_integer(source_mtime_ns):
         raise ValueError('invalid source_mtime_ns metadata')
+    if not isinstance(prepared, bool):
+        raise ValueError('invalid prepared metadata')
 
     return ParsedSidecar(
         digest=digest,
@@ -147,6 +150,7 @@ def _parse_sidecar(sidecar_path: str) -> ParsedSidecar:
             source_path=source_path,
             source_size=source_size,
             source_mtime_ns=source_mtime_ns,
+            prepared=prepared,
         ),
     )
 
@@ -265,10 +269,22 @@ def audit_archive(
                 elif parsed_sidecar.record.matches_file(target_stat):
                     report.valid_sidecars += 1
                 else:
+                    if parsed_sidecar.record.prepared:
+                        detail = (
+                            'copy receipt was prepared but not finalized; pictree will '
+                            'checksum this media before trusting or refreshing the receipt'
+                        )
+                    elif parsed_sidecar.record.file_size == target_stat.st_size:
+                        detail = (
+                            'saved modification time does not match; pictree will checksum '
+                            'this media before trusting or refreshing the receipt'
+                        )
+                    else:
+                        detail = 'saved size does not match the media file'
                     report.add_finding(
                         'stale_sidecar',
                         file_path,
-                        'saved size or modification time does not match the media file',
+                        detail,
                     )
 
                 if verify_hashes:
